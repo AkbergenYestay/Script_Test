@@ -16,13 +16,11 @@ SELECT
     acc_amount,
     end_balance,
     acc_curr,
-   -- Sub_Card,
     tr_type,
     TRANS_COUNTRY,
     TRANS_CITY,
     trans_details,
     mcc,
-    --mcc_name,
     auth_code,
     ret_ref_number,
     DCC
@@ -101,11 +99,23 @@ FROM (
     LEFT JOIN nf_way4.acc_scheme acc_scheme ON acc_scheme.id = acnt_contract.acc_scheme__id
     LEFT JOIN nf_way4.contr_subtype contr_subtype ON contr_subtype.id = acnt_contract.contr_subtype__id
     LEFT JOIN nf_way4.currency currency ON currency.code = acnt_contract.curr AND currency.amnd_state = 'A'
-    JOIN nf_way4.account account ON account.acnt_contract__oid = acnt_contract.id
+    JOIN nf_way4.account account 
+        ON account.acnt_contract__oid = acnt_contract.id
+       AND account.oper_date_year = 2025               -- 🔒 Зафиксировать год
+       AND account.oper_date_month = 7
+       AND account.oper_date_day = 23
     JOIN nf_way4.account_type account_type_ ON account_type_.id = account.account_type
     JOIN nf_way4.item item ON item.account__oid = account.id
-    JOIN nf_way4.entry entry ON entry.item__id = item.id
-    JOIN nf_way4.m_transaction m_transaction ON m_transaction.id = entry.m_transaction__id
+    JOIN nf_way4.entry entry 
+        ON entry.item__id = item.id
+       AND entry.oper_date_year = 2025                 -- 🔒 Зафиксировать год
+       AND entry.oper_date_month = 7
+       AND entry.oper_date_day = 23
+    JOIN nf_way4.m_transaction m_transaction 
+        ON m_transaction.id = entry.m_transaction__id
+       AND m_transaction.oper_date_year = 2025         -- 🔒 Зафиксировать год
+       AND m_transaction.oper_date_month = 7
+       AND m_transaction.oper_date_day = 23
     LEFT JOIN nf_way4.opt_doc doc ON doc.id = m_transaction.doc__oid
     LEFT JOIN nf_way4.currency acc_curr ON acc_curr.code = account.curr AND acc_curr.amnd_state = 'A'
     LEFT JOIN nf_way4.currency doc_curr ON doc_curr.code = doc.trans_curr AND doc_curr.amnd_state = 'A'
@@ -126,11 +136,6 @@ FROM (
       AND (account_type_.group_name <> 'TECHNICAL' OR
           (account_type_.group_name = 'TECHNICAL' AND
           account.code = 'P7'))
-      --AND entry.posting_date >= to_date('2025-07-20')
-      --AND entry.posting_date <= to_date('2025-07-20')
-      and entry.oper_date_year=2025 and entry.oper_date_month=07 and entry.oper_date_day=23 
-      and m_transaction.oper_date_year=2025 and m_transaction.oper_date_month=07 and m_transaction.oper_date_day=23
-      --and account.oper_date_year<>2023  
 ) t
 WHERE (source_reg_num IS NULL OR
       (source_reg_num IS NOT NULL AND
@@ -142,6 +147,3 @@ WHERE (source_reg_num IS NULL OR
        code LIKE 'INST%')
   AND NOT (REQUEST_CATEGORY <> 'R' AND service_class = 'A' AND
        code IN ('L11', 'L12'))
-  --AND posting_db_date = from_unixtime(unix_timestamp('20072025 18:00:00', 'ddMMyyyy HH:mm:ss'))
-  --and posting_db_date
---ORDER BY entry_id DESC

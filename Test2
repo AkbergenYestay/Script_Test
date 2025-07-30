@@ -1,0 +1,19 @@
+-- Проверка партиций в таблице ACCOUNT
+SHOW PARTITIONS nf_way4.account 
+LIKE 'oper_date_year=2023*';
+
+-- Проверка партиций в таблице ENTRY
+SHOW PARTITIONS nf_way4.entry 
+LIKE 'oper_date_year=2023*';
+
+-- Проверка партиций в таблице M_TRANSACTION
+SHOW PARTITIONS nf_way4.m_transaction 
+LIKE 'oper_date_year=2023*';
+
+-- Проверка партиций в таблице ITEM
+SHOW PARTITIONS nf_way4.item 
+LIKE 'oper_date_year=2023*';
+
+-- Проверка партиций в таблице ACCOUNT (ma alias)
+SHOW PARTITIONS nf_way4.account 
+LIKE 'oper_date_year=2023*';

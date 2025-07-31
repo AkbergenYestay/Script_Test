@@ -1,35 +1,64 @@
-[2025-07-31T09:42:36.384+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:86} INFO - Row keys: ['DEP_ID', 'ID', 'DOP', 'DEA_CODE', 'CR_EXP_PD_DAY', 'CR_EXP_IN_DAY', 'CR_EXP_IN', 'CR_EXP_PD', 'KAFKA_TIMESTAMP']
-[2025-07-31T09:42:36.384+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:87} INFO - Row values: ['7430', 3790016075, datetime.datetime(2025, 7, 31, 0, 0), '1977770000148792', datetime.datetime(2025, 6, 24, 0, 0), datetime.datetime(2025, 6, 24, 0, 0), 135793.87, 80127.35, datetime.datetime(2025, 7, 31, 13, 48, 31, 693000)] (count=9)
-[2025-07-31T09:42:36.389+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:97} INFO - data_insert count: 10000
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:98} INFO - columns count: 9, columns: ('DEP_ID', 'ID', 'DOP', 'DEA_CODE', 'CR_EXP_PD_DAY', 'CR_EXP_IN_DAY', 'CR_EXP_IN', 'CR_EXP_PD', 'S$KAFKA_TIMESTAMP')
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:101} INFO - Insert row 0: ('1043', 4125429106, datetime.datetime(2025, 7, 31, 0, 0), '2699032707218797', '', '', 0.0, 0.0, datetime.datetime(2025, 7, 31, 9, 0, 32, 300000)) (count=9)
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:101} INFO - Insert row 1: ('7401', 3849948616, datetime.datetime(2025, 7, 31, 0, 0), '1177770000279247', '', datetime.datetime(2025, 7, 22, 0, 0), 4261.05, 0.0, datetime.datetime(2025, 7, 31, 9, 0, 32, 332000)) (count=9)
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:101} INFO - Insert row 2: ('7059', 3763569511, datetime.datetime(2025, 7, 31, 0, 0), '3999060000166068', '', '', 0.0, 0.0, datetime.datetime(2025, 7, 31, 9, 0, 32, 358000)) (count=9)
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:101} INFO - Insert row 3: ('7401', 3846512371, datetime.datetime(2025, 7, 31, 0, 0), '1177770000277674', '', datetime.datetime(2025, 6, 10, 0, 0), 52603.26, 0.0, datetime.datetime(2025, 7, 31, 9, 0, 32, 370000)) (count=9)
-[2025-07-31T09:42:36.390+0000] {OCRM_CREDIT_OVERDUE_CONSUMER.py:101} INFO - Insert row 4: ('1043', 3686316416, datetime.datetime(2025, 7, 31, 0, 0), '2699032707142954', '', '', 0.0, 0.0, datetime.datetime(2025, 7, 31, 9, 0, 32, 420000)) (count=9)
-[2025-07-31T09:42:36.406+0000] {base.py:73} INFO - Using connection ID 'db_oracle_dssb__dssb_de' for task execution.
-[2025-07-31T09:42:36.455+0000] {taskinstance.py:1937} ERROR - Task failed with exception
-Traceback (most recent call last):
-  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/providers/apache/kafka/operators/consume.py", line 175, in execute
-    apply_callable(msgs)
-  File "/opt/airflow/dags/OCRM_CREDIT_OVERDUE_CONSUMER.py", line 103, in insert_rows_to_oracle_db
-    oracle_hook.insert_rows("DSSB_DE.F$OCRM_CREDIT_OVERDUE", data_insert, columns, commit_every=10_000)
-  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/providers/oracle/hooks/oracle.py", line 308, in insert_rows
-    cur.execute(sql)
-  File "/home/airflow/.local/lib/python3.8/site-packages/oracledb/cursor.py", line 743, in execute
-    impl.execute(self)
-  File "src/oracledb/impl/thin/cursor.pyx", line 173, in oracledb.thin_impl.ThinCursorImpl.execute
-  File "src/oracledb/impl/thin/protocol.pyx", line 425, in oracledb.thin_impl.Protocol._process_single_message
-  File "src/oracledb/impl/thin/protocol.pyx", line 426, in oracledb.thin_impl.Protocol._process_single_message
-  File "src/oracledb/impl/thin/protocol.pyx", line 419, in oracledb.thin_impl.Protocol._process_message
-oracledb.exceptions.DatabaseError: ORA-00947: not enough values
-Help: https://docs.oracle.com/error-help/db/ora-00947/
-[2025-07-31T09:42:36.472+0000] {taskinstance.py:1400} INFO - Marking task as FAILED. dag_id=OCRM_CREDIT_OVERDUE_CONSUMER, task_id=ingest_from_kafka_and_write_to_db, execution_date=20250731T091203, start_date=20250731T094233, end_date=20250731T094236
-[2025-07-31T09:42:36.487+0000] {warnings.py:109} WARNING - /home/airflow/.local/lib/python3.8/site-packages/airflow/utils/email.py:154: RemovedInAirflow3Warning: Fetching SMTP credentials from configuration variables will be deprecated in a future release. Please set credentials using a connection instead.
-  send_mime_email(e_from=mail_from, e_to=recipients, mime_msg=msg, conn_id=conn_id, dryrun=dryrun)
-[2025-07-31T09:42:36.488+0000] {email.py:270} INFO - Email alerting: attempt 1
-[2025-07-31T09:42:36.583+0000] {email.py:281} INFO - Sent an alert email to ['EstayA@halykbank.kz', 'ALMASA@halykbank.kz', 'QuanysQo@halykbank.kz', 'AIYGERIMIB@halykbank.kz']
-[2025-07-31T09:42:36.735+0000] {standard_task_runner.py:104} ERROR - Failed to execute job 1222086 for task ingest_from_kafka_and_write_to_db (ORA-00947: not enough values
-Help: https://docs.oracle.com/error-help/db/ora-00947/; 2570666)
-[2025-07-31T09:42:36.789+0000] {local_task_job_runner.py:228} INFO - Task exited with return code 1
-[2025-07-31T09:42:36.819+0000] {taskinstance.py:2778} INFO - 0 downstream tasks scheduled from follow-on schedule check
+def deserialize_message_list(messages):
+    data = []
+    try:
+        for m in messages:
+            s = m.value().decode("utf-8").replace("М", "M")
+            if s[-2] == ",":
+                s = f"{s[:-2]}}}"
+            data.append(json.loads(s))
+    except Exception as e:
+        logger.info(e)
+        logger.info(m.value())
+        raise e
+
+    message_timestamp = [m.timestamp() for m in messages]
+    value_list = []
+
+    for index, raw in enumerate(data):
+        row = {}
+        # ✅ Заполняем все 9 колонок
+        for col in columns:
+            if col == "S$KAFKA_TIMESTAMP":
+                row[col] = datetime.datetime.fromtimestamp(message_timestamp[index][1] / 1e3) + timedelta(hours=5)
+            else:
+                row[col] = raw.get(col, None)
+
+        # Приведение типов
+        try:
+            if row["DEP_ID"] is not None:
+                row["DEP_ID"] = str(row["DEP_ID"])
+            if row["ID"] is not None:
+                row["ID"] = int(row["ID"])
+
+            for key in ("DOP", "CR_EXP_PD_DAY", "CR_EXP_IN_DAY"):
+                value = row.get(key)
+                if value and isinstance(value, str):
+                    try:
+                        row[key] = datetime.datetime.fromisoformat(value.strip())
+                    except ValueError:
+                        try:
+                            row[key] = datetime.datetime.strptime(value.strip(), "%d.%m.%y")
+                        except ValueError:
+                            logger.warning(f"Неизвестный формат даты {key}: {value}")
+                            row[key] = None
+                else:
+                    row[key] = None
+
+            if row["DEA_CODE"] is not None:
+                row["DEA_CODE"] = str(row["DEA_CODE"])
+            if row["CR_EXP_IN"] is not None:
+                row["CR_EXP_IN"] = float(row["CR_EXP_IN"])
+            if row["CR_EXP_PD"] is not None:
+                row["CR_EXP_PD"] = float(row["CR_EXP_PD"])
+        except Exception as e:
+            logger.error(f"Ошибка преобразования типов: {e}, row={row}")
+
+        values = tuple(row[col] for col in columns)
+        value_list.append(values)
+
+    # 🔎 Логируем строки, которые не 9 значений
+    for idx, row in enumerate(value_list):
+        if len(row) != len(columns):
+            logger.error(f"Строка {idx} имеет {len(row)} значений: {row}")
+
+    return value_list

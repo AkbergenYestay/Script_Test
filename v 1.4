@@ -1,10 +1,10 @@
 WITH rc AS (
-    SELECT 'Part Advice' AS displ_col, 'A' AS data_col
-    UNION ALL SELECT 'Adjustment', 'J'
-    UNION ALL SELECT 'Request', 'Q'
-    UNION ALL SELECT 'Reversal', 'R'
-    UNION ALL SELECT 'Void', 'V'
-    UNION ALL SELECT 'Void Request', 'v'
+    SELECT 'Part Advice' AS displ_col, 'A' AS data_col FROM dual
+    UNION ALL SELECT 'Adjustment', 'J' FROM dual
+    UNION ALL SELECT 'Request', 'Q' FROM dual
+    UNION ALL SELECT 'Reversal', 'R' FROM dual
+    UNION ALL SELECT 'Void', 'V' FROM dual
+    UNION ALL SELECT 'Void Request', 'v' FROM dual
 ),
 filtered_account AS (
     SELECT *
@@ -34,37 +34,21 @@ filtered_account_ma AS (
       AND oper_date_month = 7
       AND oper_date_day = 23
 )
-SELECT /*+ MAPJOIN(rc) */
-    posting_date,
-    card_id,
-    trans_date,
-    trans_amount,
-    trans_curr,
-    fee_amount,
-    acc_amount,
-    end_balance,
-    acc_curr,
-    tr_type,
-    trans_country,
-    trans_city,
-    trans_details,
-    mcc,
-    auth_code,
-    ret_ref_number,
-    dcc
+SELECT *
 FROM (
     SELECT 
         entry.id AS entry_id,
         entry.posting_date,
         entry.contract_for AS card_id,
-        COALESCE(doc.trans_date, transaction.posting_date) AS trans_date,
+        NVL(doc.trans_date, transaction.posting_date) AS trans_date,
         doc.request_category,
         CASE 
             WHEN transaction.service_class = 'I' THEN 0
-            ELSE COALESCE(
+            ELSE NVL(
                 SIGN(entry.amount) * ABS(
                     CASE 
-                        WHEN doc.request_category = 'J' AND transaction.service_class = 'T' 
+                        WHEN doc.request_category = 'J' 
+                             AND transaction.service_class = 'T' 
                              THEN transaction.trans_amount
                         ELSE doc.trans_amount
                     END
@@ -74,18 +58,14 @@ FROM (
         END AS trans_amount,
         CASE 
             WHEN transaction.service_class = 'u' THEN acc_curr.name
-            ELSE COALESCE(tc.name, doc.trans_curr)
+            ELSE NVL(tc.name, doc.trans_curr)
         END AS trans_curr,
         entry.fee_amount AS fee_amount,
         entry.amount AS acc_amount,
         0 AS end_balance,
-        COALESCE(acc_curr.name, account.curr) AS acc_curr,
+        NVL(acc_curr.name, account.curr) AS acc_curr,
         SUBSTR(
-            CONCAT(
-                COALESCE(trans_subtype.name, transaction.trans_code),
-                ' ',
-                rc.displ_col
-            ),
+            NVL(trans_subtype.name, transaction.trans_code) || ' ' || rc.displ_col,
             1, 32
         ) AS tr_type,
         doc.trans_country,
@@ -109,8 +89,6 @@ FROM (
         ON account.acnt_contract__oid = acnt_contract.id
     JOIN dds.w4_account_type_h account_type_ 
         ON account_type_.id = account.account_type
-    --JOIN nf_way4.item item 
-    --    ON item.account__oid = account.id
     JOIN filtered_entry entry 
         ON entry.account_id = account.id
     JOIN filtered_transaction transaction 
@@ -118,9 +96,11 @@ FROM (
     LEFT JOIN dds.w4_transaction_fl doc 
         ON doc.id = transaction.doc_id
     LEFT JOIN dds.gm_currency_s acc_curr 
-        ON acc_curr.code = account.curr AND acc_curr.gm_system_code = 'W4'
+        ON acc_curr.code = account.curr 
+        AND acc_curr.gm_system_code = 'W4'
     LEFT JOIN dds.gm_currency_s tc 
-        ON tc.code = doc.trans_curr AND tc.gm_system_code = 'W4'
+        ON tc.code = doc.trans_curr 
+        AND tc.gm_system_code = 'W4'
     LEFT JOIN dds.w4_transaction_fl trans_subtype 
         ON trans_subtype.id = transaction.trans_subtype
     LEFT JOIN rc 
@@ -128,14 +108,31 @@ FROM (
     LEFT JOIN filtered_account_ma ma 
         ON transaction.target_account = ma.id
     WHERE 
-        (transaction.service_class NOT IN ('L', 'U') OR (transaction.service_class = 'u' AND transaction.trans_code LIKE 'uP%' AND ma.account_name LIKE 'Cl Unpaid%'))
-        AND NOT (transaction.service_class IN ('d', 'D') AND transaction.trans_code <> 'D+')
-        AND CASE WHEN transaction.service_class = 'D' THEN 'P' ELSE account.code END = account.code
-        AND (account.is_am_available = 'Y' OR account.code LIKE 'P%' OR account.code = 'F3')
-        AND (account_type_.group_name <> 'TECHNICAL' OR (account_type_.group_name = 'TECHNICAL' AND account.code = 'P7'))
+        (transaction.service_class NOT IN ('L', 'U') 
+            OR (transaction.service_class = 'u' 
+                AND transaction.trans_code LIKE 'uP%' 
+                AND ma.account_name LIKE 'Cl Unpaid%'))
+        AND NOT (transaction.service_class IN ('d', 'D') 
+                 AND transaction.trans_code <> 'D+')
+        AND CASE 
+                WHEN transaction.service_class = 'D' THEN 'P' 
+                ELSE account.code 
+            END = account.code
+        AND (account.is_am_available = 'Y' 
+             OR account.code LIKE 'P%' 
+             OR account.code = 'F3')
+        AND (account_type_.group_name <> 'TECHNICAL' 
+             OR (account_type_.group_name = 'TECHNICAL' 
+                 AND account.code = 'P7'))
 ) t
 WHERE 
-    (source_reg_num IS NULL OR (UPPER(source_reg_num) NOT LIKE 'WF_ARST%' AND UPPER(source_reg_num) NOT LIKE 'K2SL%'))
-    AND (trans_details IS NULL OR UPPER(trans_details) NOT LIKE 'WF_ARST%')
-    AND NOT (request_category <> 'R' AND service_class = 'A' AND (code LIKE 'INST%' OR code IN ('L11', 'L12')))
-LIMIT 10;
+    (source_reg_num IS NULL 
+        OR (UPPER(source_reg_num) NOT LIKE 'WF_ARST%' 
+            AND UPPER(source_reg_num) NOT LIKE 'K2SL%'))
+    AND (trans_details IS NULL 
+        OR UPPER(trans_details) NOT LIKE 'WF_ARST%')
+    AND NOT (request_category <> 'R' 
+             AND service_class = 'A' 
+             AND (code LIKE 'INST%' 
+                  OR code IN ('L11', 'L12')))
+FETCH FIRST 10 ROWS ONLY;

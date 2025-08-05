@@ -1,3 +1,17 @@
+•	Acnt_contract   - nf_way4.opt_acnt_contract_gp - dds.w4_contract_s
+•	Doc        -              nf_way4.opt_doc – doc в связке с  M_transaction  рождают dds.w4_transaction_fl
+•	M_transaction  -              nf_way4.m_transaction - doc в связке с  M_transaction  рождают dds.w4_transaction_fl
+•	Entry     -              nf_way4.entry - dds.w4_account_entry_fl
+•	Item      -              nf_way4.item -  аналога не нашла, Юля, может пока без нее?
+•	Account    -      nf_way4.account - dds.W4_ACCOUNT_S
+•	Client    -              nf_way4.opt_client - dds.w4_gm_subject_s
+•	Account_type   -              nf_way4.account_type - dds.w4_account_type_h
+•	Currency             -              nf_way4.currency -  select * from  dds.gm_currency_s t where t.gm_system_code='W4'
+•	Serv_pack          -              nf_way4.serv_pack - dds.w4_service_h
+•	Acc_scheme      -              nf_way4.acc_scheme - dds.w4_acc_scheme_h
+•	Contr_subtype -              nf_way4.contr_subtype - dds.w4_contract_subtype_h
+•	Trans_subtype -              nf_way4.trans_subtype – необходимые поля есть в dds.w4_transaction_fl
+
 WITH rc AS (
     SELECT 'Part Advice' AS displ_col, 'A' AS data_col
     UNION ALL SELECT 'Adjustment', 'J'

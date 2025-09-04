@@ -1,35 +1,68 @@
-Операция	Объект	Оптимизатор	Цена	Мощность	Байты
-SELECT STATEMENT		ALL_ROWS	1585507	1275833	1076803052
-HASH JOIN (RIGHT OUTER)		[NULL]	1585507	1275833	1076803052
-TABLE ACCESS (FULL)	RS_GM_OPERTYPE_H	ANALYZED	12	2753	225746
-HASH JOIN (RIGHT OUTER)		[NULL]	1585491	1250808	953115696
-TABLE ACCESS (FULL)	RS_GM_OPERTYPE_H	ANALYZED	12	2753	220240
-HASH JOIN (RIGHT SEMI)		[NULL]	1585476	1250808	853051056
-VIEW	VW_SQ_1	[NULL]	57322	12416129	161409677
-HASH JOIN		[NULL]	57322	12416129	285570967
-NESTED LOOPS		[NULL]	57322	12416129	285570967
-NESTED LOOPS		[NULL]	7224	0	0
-STATISTICS COLLECTOR		[NULL]	7224	0	0
-INDEX (FAST FULL SCAN)	RS_DS_CONTRACT_H_PK	ANALYZED	7224	11269895	78889265
-INDEX (RANGE SCAN)	RS_DS_CONTRACT_ACCOUNT_L_IDX1	ANALYZED	0	0	0
-TABLE ACCESS (BY INDEX ROWID)	RS_DS_CONTRACT_ACCOUNT_L	ANALYZED	22851	1	16
-TABLE ACCESS (FULL)	RS_DS_CONTRACT_ACCOUNT_L	ANALYZED	22851	12852542	205640672
-HASH JOIN (RIGHT OUTER)		[NULL]	1473163	1250808	836790552
-PARTITION LIST (SINGLE)		[NULL]	1599	55769	1449994
-TABLE ACCESS (FULL)	RS_PD_ORDCASH_FL	ANALYZED	1599	55769	1449994
-HASH JOIN (RIGHT OUTER)		[NULL]	1432732	1250808	804269544
-VIEW		[NULL]	477417	264052	17163380
-WINDOW (SORT PUSHED RANK)		[NULL]	477417	264052	17163380
-HASH JOIN		[NULL]	473319	264052	17163380
-TABLE ACCESS (FULL)	RS_DS_HALFENTRY_OPER_L	ANALYZED	468516	264053	8713749
-PARTITION LIST (SINGLE)		[NULL]	3611	301283	9641056
-HASH JOIN (RIGHT OUTER)		[NULL]	919639	1244542	719345276
-TABLE ACCESS (FULL)	RS_GM_OPERTYPE_H	ANALYZED	12	2753	220240
-HASH JOIN (RIGHT OUTER)		[NULL]	919624	1244542	619781916
-PARTITION LIST (SINGLE)		[NULL]	8080	376675	9040200
-TABLE ACCESS (FULL)	RS_PD_PAYMENT_FL	ANALYZED	8080	376675	9040200
-HASH JOIN		[NULL]	882304	1244542	589912908
-TABLE ACCESS (FULL)	GL_ACCOUNT_H	ANALYZED	183251	15958573	494715763
-HASH JOIN		[NULL]	620945	2120132	939218476
-TABLE ACCESS (FULL)	GM_SUBJECT_H	ANALYZED	305779	18728823	1273559964
-PARTITION LIST (SINGLE)		[NULL]	115340	7046306	2642364750
+ Plan Hash Value  : 4071291753 
+
+---------------------------------------------------------------------------------------------------------------------------------
+| Id   | Operation                                        | Name                     | Rows    | Bytes      | Cost   | Time     |
+---------------------------------------------------------------------------------------------------------------------------------
+|    0 | SELECT STATEMENT                                 |                          |       1 |        831 | 922677 | 00:00:37 |
+|  * 1 |   FILTER                                         |                          |         |            |        |          |
+|    2 |    NESTED LOOPS                                  |                          |       1 |        831 | 900293 | 00:00:36 |
+|    3 |     NESTED LOOPS OUTER                           |                          |       1 |        800 | 900291 | 00:00:36 |
+|    4 |      NESTED LOOPS OUTER                          |                          |       1 |        720 | 900290 | 00:00:36 |
+|    5 |       NESTED LOOPS OUTER                         |                          |       1 |        696 | 900287 | 00:00:36 |
+|  * 6 |        HASH JOIN OUTER                           |                          |       1 |        616 | 900286 | 00:00:36 |
+|    7 |         NESTED LOOPS OUTER                       |                          |       1 |        551 | 422869 | 00:00:17 |
+|  * 8 |          HASH JOIN OUTER                         |                          |       1 |        469 | 422867 | 00:00:17 |
+|  * 9 |           HASH JOIN                              |                          |       1 |        443 | 421268 | 00:00:17 |
+| * 10 |            TABLE ACCESS FULL                     | GM_SUBJECT_H             |       1 |         68 | 305914 | 00:00:12 |
+|   11 |            PARTITION LIST SINGLE                 |                          | 7046306 | 2642364750 | 115335 | 00:00:05 |
+|   12 |             TABLE ACCESS FULL                    | RS_GL_HALFENTRY_FL       | 7046306 | 2642364750 | 115335 | 00:00:05 |
+|   13 |           PARTITION LIST SINGLE                  |                          |   55769 |    1449994 |   1599 | 00:00:01 |
+|   14 |            TABLE ACCESS FULL                     | RS_PD_ORDCASH_FL         |   55769 |    1449994 |   1599 | 00:00:01 |
+|   15 |          TABLE ACCESS BY INDEX ROWID BATCHED     | RS_GM_OPERTYPE_H         |       1 |         82 |      2 | 00:00:01 |
+| * 16 |           INDEX RANGE SCAN                       | RS_GM_OPERTYPE_H_IDX2    |       1 |            |      1 | 00:00:01 |
+| * 17 |         VIEW                                     |                          |  264052 |   17163380 | 477417 | 00:00:19 |
+| * 18 |          WINDOW SORT PUSHED RANK                 |                          |  264052 |   17163380 | 477417 | 00:00:19 |
+| * 19 |           HASH JOIN                              |                          |  264052 |   17163380 | 473319 | 00:00:19 |
+| * 20 |            TABLE ACCESS FULL                     | RS_DS_HALFENTRY_OPER_L   |  264053 |    8713749 | 468516 | 00:00:19 |
+|   21 |            PARTITION LIST SINGLE                 |                          |  301283 |    9641056 |   3611 | 00:00:01 |
+|   22 |             TABLE ACCESS FULL                    | RS_DS_OPER_FL            |  301283 |    9641056 |   3611 | 00:00:01 |
+|   23 |        TABLE ACCESS BY INDEX ROWID               | RS_GM_OPERTYPE_H         |       1 |         80 |      1 | 00:00:01 |
+| * 24 |         INDEX UNIQUE SCAN                        | RS_GM_OPERTYPE_H_PK      |       1 |            |      0 | 00:00:01 |
+|   25 |       PARTITION LIST SINGLE                      |                          |       1 |         24 |      3 | 00:00:01 |
+|   26 |        TABLE ACCESS BY LOCAL INDEX ROWID BATCHED | RS_PD_PAYMENT_FL         |       1 |         24 |      3 | 00:00:01 |
+| * 27 |         INDEX RANGE SCAN                         | RS_PD_PAYMENT_FL_IDX0    |       1 |            |      2 | 00:00:01 |
+|   28 |      TABLE ACCESS BY INDEX ROWID                 | RS_GM_OPERTYPE_H         |       1 |         80 |      1 | 00:00:01 |
+| * 29 |       INDEX UNIQUE SCAN                          | RS_GM_OPERTYPE_H_PK      |       1 |            |      0 | 00:00:01 |
+| * 30 |     TABLE ACCESS BY INDEX ROWID                  | GL_ACCOUNT_H             |       1 |         31 |      2 | 00:00:01 |
+| * 31 |      INDEX UNIQUE SCAN                           | GL_ACCOUNT_H_PK          |       1 |            |      1 | 00:00:01 |
+|   32 |    NESTED LOOPS SEMI                             |                          |       3 |         69 |  22384 | 00:00:01 |
+| * 33 |     TABLE ACCESS FULL                            | RS_DS_CONTRACT_ACCOUNT_L |       3 |         48 |  22381 | 00:00:01 |
+| * 34 |     INDEX UNIQUE SCAN                            | RS_DS_CONTRACT_H_PK      | 7513264 |   52592848 |      1 | 00:00:01 |
+---------------------------------------------------------------------------------------------------------------------------------
+
+Predicate Information (identified by operation id):
+------------------------------------------
+* 1 - filter( EXISTS (SELECT 0 FROM "DDS"."RS_DS_CONTRACT_ACCOUNT_L" "L","DDS"."RS_DS_CONTRACT_H" "DS" WHERE "DS"."DWH_ID"="L"."RS_DS_CONTRACT_ID" AND "L"."GL_ACCOUNT_ID"=:B1 AND
+  "L"."IS_ACTUAL"='A'))
+* 6 - access("RS_GL_HALFENTRY_SOURCE_ID"(+)="FF"."SOURCE_ID" AND "RS_GL_HALFENTRY_INCOM_FL"(+)="FF"."INCOM_FL" AND "RS_GL_HALFENTRY_NORD"(+)="FF"."NORD")
+* 8 - access("CASH"."SOURCE_ID"(+)="FF"."ORD_ID")
+* 9 - access("G"."DWH_ID"="FF"."GM_SUBJECT_ID")
+* 10 - filter("G"."IIN_BIN"='871119350591' AND "G"."GM_SYSTEM_CODE"='RS')
+* 16 - access("SOT"."DWH_CODE"(+)="CASH"."PD_OPRCHR_CODE")
+* 17 - filter("RNK"(+)=1)
+* 18 - filter(ROW_NUMBER() OVER ( PARTITION BY "L"."RS_GL_HALFENTRY_SOURCE_ID","L"."RS_GL_HALFENTRY_INCOM_FL","L"."RS_GL_HALFENTRY_NORD" ORDER BY INTERNAL_FUNCTION("O"."OPER_DATE") DESC )<=1)
+* 19 - access("O"."SOURCE_ID"="L"."RS_DS_OPER_SOURCE_ID" AND "O"."NJRN"="L"."RS_DS_OPER_NJRN")
+* 20 - filter("L"."DATE_VALUE"=TO_DATE(' 2025-07-31 00:00:00', 'syyyy-mm-dd hh24:mi:ss'))
+* 24 - access("DOT"."DWH_ID"(+)="RS_GM_OPERTYPE_ID")
+* 27 - access("PD"."DATE_VALUE"(+)=TO_DATE(' 2025-07-31 00:00:00', 'syyyy-mm-dd hh24:mi:ss') AND "PD"."SOURCE_ID"(+)="FF"."ORD_ID")
+* 29 - access("POT"."DWH_ID"(+)="PD"."RS_GM_OPERTYPE_ID")
+* 30 - filter("AC"."GM_SYSTEM_CODE"='RS')
+* 31 - access("AC"."DWH_ID"="FF"."GL_ACCOUNT_ID")
+* 33 - filter("L"."GL_ACCOUNT_ID"=:B1 AND "L"."IS_ACTUAL"='A')
+* 34 - access("DS"."DWH_ID"="L"."RS_DS_CONTRACT_ID")
+
+
+Notes
+-----
+- This is an adaptive plan
+

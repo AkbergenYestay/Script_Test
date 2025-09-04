@@ -1,97 +1,102 @@
-/*+
-  QB_NAME(main)
-  LEADING(b ff ctr ac g ol r dot sot pot)
-  USE_NL(ff ctr ac g ol r dot sot pot)
-  INDEX(ff RS_GL_HALFENTRY_FL_X1)          -- локальный по (date_value, entry_id)
-  INDEX(pd RS_PD_PAYMENT_FL_X1)            -- локальный по (date_value, entry_id)
-  INDEX(cash RS_PD_ORDCASH_FL_X1)          -- локальный по (date_value, entry_id)
-  INDEX(o RS_DS_HALFENTRY_OPER_L_X1)       -- локальный по (date_value, entry_id, actual_from DESC)
-  INDEX(ca RS_DS_CONTRACT_ACCOUNT_L_IDX1)  -- по (gl_account_h_id) или составной, см. ниже
-  INDEX(ch RS_DS_CONTRACT_H_PK)
-  NO_MERGE(ctr)
-  NO_EXPAND
-*/
+/* :p_date — строка 'dd.mm.yyyy', напр. '31.07.2025' */
 WITH
 params AS (
-  SELECT TO_DATE(:p_date,'dd.mm.yyyy') d FROM dual
+  SELECT TO_DATE(:p_date, 'dd.mm.yyyy') d FROM dual
 ),
--- Узкий драйвер: половинки проводок за день
+
+/* Узкий драйвер: половинки проводок за день */
 ff AS (
-  SELECT /*+ QB_NAME(ffv) */
-         ff.entry_id, ff.source_id AS trn_id, ff.gm_currency_id AS ddepo_currency,
-         ff.exec_date AS ddepo_fromdate, ff.sdok_sum AS oper_sum,
-         ff.sdok_sum_nat AS oper_sum_nat, ff.gl_account_h_id, ff.gm_subject_h_id
+  SELECT
+    ff.entry_id,
+    ff.source_id,
+    ff.gm_currency_id,
+    ff.exec_date,
+    ff.sdok_sum,
+    ff.sdok_sum_nat,
+    ff.gl_account_id,
+    ff.gm_subject_id,
+    ff.ord_id,
+    ff.incom_fl,
+    ff.nord
   FROM dds.RS_GL_HALFENTRY_FL ff
   JOIN params p ON ff.date_value = p.d
 ),
--- Активные контрактные счета -> отфильтровываем сразу
-ctr AS (
-  SELECT /*+ QB_NAME(ctrv) */
-         ca.gl_account_h_id
-  FROM dds.RS_DS_CONTRACT_ACCOUNT_L ca
-  JOIN dds.RS_DS_CONTRACT_H ch
-    ON ch.id = ca.rs_ds_contract_h_id
-   AND ch.is_actual = 'A'
-   AND ca.is_actual = 'A'
-  GROUP BY ca.gl_account_h_id
-),
--- Последняя операция на дату
+
+/* Последний тип операции на дату по связке SOURCE_ID/INCOM_FL/NORD */
 oper AS (
-  SELECT /*+ QB_NAME(operv) */ o.entry_id, o.doc, o.dscr,
-         o.rs_gm_opertype_id_dot AS dot_id,
-         o.rs_gm_opertype_id_sot AS sot_id,
-         o.rs_gm_opertype_id_pot AS pot_id,
-         ROW_NUMBER() OVER (PARTITION BY o.entry_id
-                            ORDER BY o.actual_from DESC NULLS LAST) rn
-  FROM dds.RS_DS_HALFENTRY_OPER_L o
-  JOIN params p ON o.date_value = p.d
+  SELECT
+    l.RS_GL_HALFENTRY_SOURCE_ID,
+    l.RS_GL_HALFENTRY_INCOM_FL,
+    l.RS_GL_HALFENTRY_NORD,
+    o.RS_GM_OPERTYPE_ID,
+    ROW_NUMBER() OVER (
+      PARTITION BY l.RS_GL_HALFENTRY_SOURCE_ID, l.RS_GL_HALFENTRY_INCOM_FL, l.RS_GL_HALFENTRY_NORD
+      ORDER BY o.OPER_DATE DESC NULLS LAST
+    ) rn
+  FROM dds.RS_DS_HALFENTRY_OPER_L l
+  JOIN dds.RS_DS_OPER_FL o
+    ON o.SOURCE_ID = l.RS_DS_OPER_SOURCE_ID
+   AND o.NJRN     = l.RS_DS_OPER_NJRN
+  JOIN params p
+    ON l.DATE_VALUE = p.d
+   AND o.DATE_VALUE = p.d
 ),
 oper_last AS (
-  SELECT entry_id, doc, dscr, dot_id, sot_id, pot_id
+  SELECT RS_GL_HALFENTRY_SOURCE_ID, RS_GL_HALFENTRY_INCOM_FL, RS_GL_HALFENTRY_NORD, RS_GM_OPERTYPE_ID
   FROM oper
   WHERE rn = 1
-),
--- refer из PD или CASH (приоритет PD)
-ref_union AS (
-  SELECT entry_id,
-         MAX(refer) KEEP (DENSE_RANK FIRST ORDER BY pri) AS refer
-  FROM (
-    SELECT /*+ QB_NAME(pdq) */ pd.entry_id, pd.refer, 1 AS pri
-    FROM dds.RS_PD_PAYMENT_FL pd
-    JOIN params p ON pd.date_value = p.d
-    UNION ALL
-    SELECT /*+ QB_NAME(cashq) */ c.entry_id, c.refer, 2 AS pri
-    FROM dds.RS_PD_ORDCASH_FL c
-    JOIN params p ON c.date_value = p.d
-  ) u
-  GROUP BY entry_id
 )
+
 SELECT
-  'COLVIR_DEPO' AS system,
-  f.ddepo_currency,
-  f.ddepo_fromdate,
-  f.oper_sum,
-  f.oper_sum_nat,
-  r.refer,
-  f.trn_id,
-  CAST(ac.account_number AS VARCHAR2(50)) AS id,
-  CASE WHEN ac.incom_fl = 1 THEN 0 ELSE 1 END AS dohod,
-  COALESCE(ol.dscr, dot.longname, sot.longname, pot.longname, ol.doc) AS operation_name,
-  g.iin_bin AS iin,
-  g.longname AS name,
-  dot.longname AS dot_longname,
-  sot.longname AS sot_longname,
-  pot.longname AS pot_longname
-FROM ff f
-/* Сжимаем поток РАНО: semi-join по активным контрактам */
+  'COLVIR_DEPO'                                  AS system,
+  ff.gm_currency_id                              AS ddepo_currency,
+  ff.exec_date                                   AS ddepo_fromdate,
+  ff.sdok_sum                                    AS oper_sum,
+  ff.sdok_sum_nat                                AS oper_sum_nat,
+  NVL(pd.refer, cash.refer)                      AS refer,
+  ff.source_id                                   AS trn_id,
+  TO_CHAR(ac.account_number)                     AS id,
+  CASE WHEN ff.incom_fl = 1 THEN 0 ELSE 1 END    AS dohod,
+  /* оставляю твою логику наименование операции из ff, с безопасным фоллбеком */
+  COALESCE(ff.dscr, ff.doc, dot.longname, sot.longname, pot.longname) AS operation_name,
+  g.iin_bin                                       AS iin,
+  g.longname                                      AS name,
+  dot.longname                                    AS dot_longname,
+  sot.longname                                    AS sot_longname,
+  pot.longname                                    AS pot_longname
+FROM ff
+/* справочники — как у тебя: по DWH_ID и system_code = 'RS' */
+JOIN dds.gl_account_h ac
+  ON ac.dwh_id = ff.gl_account_id
+ AND ac.gm_system_code = 'RS'   -- см. исходный скрипт
+JOIN dds.gm_subject_h g
+  ON g.dwh_id = ff.gm_subject_id
+ AND g.gm_system_code = 'RS'    -- см. исходный скрипт
+/* PD / CASH на дату через ORD_ID, как у тебя */
+LEFT JOIN dds.RS_PD_PAYMENT_FL pd
+  ON pd.source_id = ff.ord_id
+ AND pd.date_value = (SELECT d FROM params)
+LEFT JOIN dds.RS_PD_ORDCASH_FL cash
+  ON cash.source_id = ff.ord_id
+ AND cash.date_value = (SELECT d FROM params)
+/* Последний тип операции (DOT) по оконке */
+LEFT JOIN oper_last ol
+  ON ol.RS_GL_HALFENTRY_SOURCE_ID = ff.source_id
+ AND ol.RS_GL_HALFENTRY_INCOM_FL  = ff.incom_fl
+ AND ol.RS_GL_HALFENTRY_NORD      = ff.nord
+LEFT JOIN dds.RS_GM_OPERTYPE_H dot
+  ON dot.DWH_ID = ol.RS_GM_OPERTYPE_ID
+/* SOT и POT — ровно как в твоём тексте */
+LEFT JOIN dds.RS_GM_OPERTYPE_H sot
+  ON sot.DWH_CODE = cash.PD_OPRCHR_CODE
+LEFT JOIN dds.RS_GM_OPERTYPE_H pot
+  ON pot.DWH_ID = pd.RS_GM_OPERTYPE_ID
+/* Контрактная фильтрация — как было, но через EXISTS (селективно и без функций) */
 WHERE EXISTS (
-  SELECT 1 FROM ctr
-  WHERE ctr.gl_account_h_id = f.gl_account_h_id
-)
-JOIN dds.gl_account_h ac ON ac.id = f.gl_account_h_id
-JOIN dds.gm_subject_h g  ON g.id  = f.gm_subject_h_id
-LEFT JOIN oper_last ol   ON ol.entry_id = f.entry_id
-LEFT JOIN ref_union r    ON r.entry_id  = f.entry_id
-LEFT JOIN dds.RS_GM_OPERTYPE_H dot ON dot.id = ol.dot_id AND dot.is_actual = 'A'
-LEFT JOIN dds.RS_GM_OPERTYPE_H sot ON sot.id = ol.sot_id AND sot.is_actual = 'A'
-LEFT JOIN dds.RS_GM_OPERTYPE_H pot ON pot.id = ol.pot_id AND pot.is_actual = 'A';
+  SELECT 1
+  FROM dds.RS_DS_CONTRACT_H ds,
+       dds.RS_DS_CONTRACT_ACCOUNT_L l
+  WHERE ds.DWH_ID = l.RS_DS_CONTRACT_ID
+    AND l.GL_ACCOUNT_ID = ff.GL_ACCOUNT_ID
+    AND l.IS_ACTUAL = 'A'
+);

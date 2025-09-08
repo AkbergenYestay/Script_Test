@@ -1,4 +1,28 @@
-Select 'COLVIR_DEPO' as SYSTEM,
+with 
+params as
+ (select to_date('31.07.2025', 'dd.mm.yyyy') d_b,
+         to_date('31.07.2025', 'dd.mm.yyyy') d_e
+    from dual),
+oper as
+ (select RS_GL_HALFENTRY_SOURCE_ID,
+        RS_GL_HALFENTRY_INCOM_FL,
+        RS_GL_HALFENTRY_NORD,
+        RS_GM_OPERTYPE_ID
+   from (select row_number() over(partition by l.RS_GL_HALFENTRY_SOURCE_ID, l.RS_GL_HALFENTRY_INCOM_FL, l.RS_GL_HALFENTRY_NORD order by o.OPER_DATE desc) rnk,
+                l.RS_GL_HALFENTRY_SOURCE_ID,
+                l.RS_GL_HALFENTRY_INCOM_FL,
+                l.RS_GL_HALFENTRY_NORD,
+                o.RS_GM_OPERTYPE_ID
+           from dds.RS_DS_HALFENTRY_OPER_L l, dds.RS_DS_OPER_FL o
+          where l.DATE_VALUE =
+                to_date('31.07.2025', 'dd.mm.yyyy')
+            and o.DATE_VALUE =
+                to_date('31.07.2025', 'dd.mm.yyyy')
+            and o.SOURCE_ID = l.RS_DS_OPER_SOURCE_ID
+            and o.NJRN = l.RS_DS_OPER_NJRN)
+  where rnk = 1
+ )
+select 'COLVIR_DEPO' as SYSTEM,
        ff.gm_currency_id DDEPO_CURRENCY,
        exec_date DDEPO_FROMDATE,
        sdok_sum oper_sum,
@@ -19,6 +43,7 @@ Select 'COLVIR_DEPO' as SYSTEM,
        sot.LONGNAME,
        pot.LONGNAME
   from dds.RS_GL_HALFENTRY_FL ff
+ inner join params p on ff.date_value >= p.d_b and ff.date_value <= p.d_e
  inner join dds.gl_account_h ac
     on ac.dwh_id = ff.gl_account_id
    and ac.gm_system_code = 'RS'
@@ -31,23 +56,7 @@ Select 'COLVIR_DEPO' as SYSTEM,
   left join dds.RS_PD_ORDCASH_FL cash
     on cash.SOURCE_ID = ff.ORD_ID
    and cash.DATE_VALUE = to_date('31.07.2025', 'dd.mm.yyyy')
-  left join (select RS_GL_HALFENTRY_SOURCE_ID,
-                    RS_GL_HALFENTRY_INCOM_FL,
-                    RS_GL_HALFENTRY_NORD,
-                    RS_GM_OPERTYPE_ID
-               from (select row_number() over(partition by l.RS_GL_HALFENTRY_SOURCE_ID, l.RS_GL_HALFENTRY_INCOM_FL, l.RS_GL_HALFENTRY_NORD order by o.OPER_DATE desc) rnk,
-                            l.RS_GL_HALFENTRY_SOURCE_ID,
-                            l.RS_GL_HALFENTRY_INCOM_FL,
-                            l.RS_GL_HALFENTRY_NORD,
-                            o.RS_GM_OPERTYPE_ID
-                       from dds.RS_DS_HALFENTRY_OPER_L l, dds.RS_DS_OPER_FL o
-                      where l.DATE_VALUE =
-                            to_date('31.07.2025', 'dd.mm.yyyy')
-                        and o.DATE_VALUE =
-                            to_date('31.07.2025', 'dd.mm.yyyy')
-                        and o.SOURCE_ID = l.RS_DS_OPER_SOURCE_ID
-                        and o.NJRN = l.RS_DS_OPER_NJRN)
-              where rnk = 1) oper
+  left join oper
     on oper.RS_GL_HALFENTRY_SOURCE_ID = ff.SOURCE_ID
    and oper.RS_GL_HALFENTRY_INCOM_FL = ff.INCOM_FL
    and oper.RS_GL_HALFENTRY_NORD = ff.NORD
@@ -57,13 +66,11 @@ Select 'COLVIR_DEPO' as SYSTEM,
     on sot.DWH_CODE = cash.PD_OPRCHR_CODE
   left join dds.RS_GM_OPERTYPE_H pot
     on pot.DWH_ID = pd.RS_GM_OPERTYPE_ID
- where ff.DATE_VALUE = to_date('31.07.2025', 'dd.mm.yyyy')
-      --and ff.GM_SUBJECT_ID = 85959116
-      --and ff.GL_ACCOUNT_ID = 172530348
-   AND g.iin_bin = '871119350591'
-   and exists
- (select 1
-          from dds.RS_DS_CONTRACT_H ds, dds.RS_DS_CONTRACT_ACCOUNT_L l
-         where ds.DWH_ID = l.RS_DS_CONTRACT_ID
-           and l.GL_ACCOUNT_ID = ff.GL_ACCOUNT_ID
-           and l.IS_ACTUAL = 'A')
+ where --ff.DATE_VALUE between to_date('31.07.2025', 'dd.mm.yyyy') and to_date('31.07.2025', 'dd.mm.yyyy')
+   exists
+	 (select 1
+	  from dds.RS_DS_CONTRACT_H ds, dds.RS_DS_CONTRACT_ACCOUNT_L l
+	 where ds.DWH_ID = l.RS_DS_CONTRACT_ID
+	   and l.GL_ACCOUNT_ID = ff.GL_ACCOUNT_ID
+	   and l.IS_ACTUAL = 'A')
+   and g.iin_bin = '871119350591'

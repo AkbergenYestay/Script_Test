@@ -1,13 +1,11 @@
--- Oracle: сформировать строку интервального "tstzrange"
 WITH base AS (
-  -- локальная полуночь сегодня в таймзоне сессии
-  SELECT FROM_TZ(CAST(TRUNC(CURRENT_DATE) AS TIMESTAMP), SESSIONTIMEZONE) AS local_midnight
+  SELECT FROM_TZ(CAST(TRUNC(CURRENT_DATE) AS TIMESTAMP), '+05:00') AS local_midnight
   FROM dual
 )
 SELECT
   '['
-  || TO_CHAR(local_midnight - INTERVAL '5' HOUR,                              'YYYY-MM-DD HH24:MI:SS TZH')
-  || ', '
-  || TO_CHAR(local_midnight + INTERVAL '13' DAY + INTERVAL '19' HOUR,         'YYYY-MM-DD HH24:MI:SS TZH')
-  || ')' AS tstzrange
+  || TO_CHAR(local_midnight - INTERVAL '5' HOUR, 'YYYY-MM-DD HH24:MI:SSTZH:TZM')
+  || ','
+  || TO_CHAR(local_midnight + INTERVAL '13' DAY + INTERVAL '19' HOUR, 'YYYY-MM-DD HH24:MI:SSTZH:TZM')
+  || ')' AS tstzrange_literal
 FROM base;

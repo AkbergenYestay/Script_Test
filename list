@@ -1,0 +1,241 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Generic results parser for Almaty / Turkestan marathon (and similar)
+- Finds HTML table with participant results
+- Maps common Russian/English headers to normalized fields
+- Follows pagination (next/Следующая or ?page=)
+- Saves to CSV
+
+Usage examples:
+    python almaty_turkestan_parser.py --url "https://<RESULTS_URL>" --out out.csv
+    python almaty_turkestan_parser.py --url "https://<RESULTS_URL>" --out out.csv --max-pages 20
+    python almaty_turkestan_parser.py --url "https://<RESULTS_URL>" --dry-run
+"""
+from dataclasses import dataclass, asdict
+from typing import List, Optional, Dict, Tuple, Iterable
+import requests
+from bs4 import BeautifulSoup
+import re
+import csv
+import sys
+import argparse
+from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
+
+@dataclass
+class Participant:
+    name: Optional[str] = None
+    city: Optional[str] = None
+    bib: Optional[str] = None
+    age_group: Optional[str] = None
+    category: Optional[str] = None
+    result: Optional[str] = None
+    gender: Optional[str] = None
+    team: Optional[str] = None
+    rank_overall: Optional[str] = None
+    rank_gender: Optional[str] = None
+    rank_category: Optional[str] = None
+    raw: Dict[str, str] = None  # all detected columns as fallback
+
+HEADER_ALIASES = {
+    "name": {"фио", "имя", "участник", "участники", "athlete", "runner", "participant", "full name", "surname / name"},
+    "city": {"город", "city", "место", "location", "place of residence"},
+    "bib": {"номер", "стартовый номер", "bib", "bib number", "start #", "биб"},
+    "age_group": {"возраст", "возр.кат.", "возрастная категория", "age group", "age-category", "age cat"},
+    "category": {"дистанция", "категория", "забег", "race", "distance", "category", "event"},
+    "result": {"результат", "время", "итог", "finish time", "gun time", "chip time", "official time"},
+    "gender": {"пол", "gender", "m/f", "sex"},
+    "team": {"клуб", "команда", "team", "club"},
+    "rank_overall": {"место", "место общее", "overall", "pos", "rank", "position"},
+    "rank_gender": {"место (пол)", "место среди мужчин", "место среди женщин", "gender rank"},
+    "rank_category": {"место (кат.)", "место (возр.)", "категория место", "age rank", "cat rank"},
+}
+
+PAGINATION_HINTS = {"следующая", "вперёд", "вперед", "далее", "next", "older", "more", "»", "›"}
+
+def normalize_header(text: str) -> str:
+    t = re.sub(r"\s+", " ", text.strip().lower())
+    t = t.replace("ё", "е")
+    return t
+
+def guess_column_map(headers: List[str]) -> Dict[int, str]:
+    col_map = {}
+    normalized = [normalize_header(h) for h in headers]
+    for idx, h in enumerate(normalized):
+        for key, alias_set in HEADER_ALIASES.items():
+            if h in alias_set:
+                col_map[idx] = key
+                break
+            else:
+                for alias in alias_set:
+                    if alias in h:
+                        col_map[idx] = key
+                        break
+                if idx in col_map:
+                    break
+    return col_map
+
+def find_results_table(soup: BeautifulSoup) -> Optional[Tuple[List[str], Iterable[List[str]]]]:
+    tables = soup.find_all("table")
+    best_score = -1
+    best_table = None
+
+    for table in tables:
+        headers = []
+        thead = table.find("thead")
+        if thead:
+            headers = [th.get_text(strip=True) for th in thead.find_all(["th", "td"])]
+        if not headers:
+            first_tr = table.find("tr")
+            if first_tr:
+                headers = [td.get_text(strip=True) for td in first_tr.find_all(["th", "td"])]
+        if not headers:
+            continue
+
+        col_map = guess_column_map(headers)
+        score = len(col_map)
+
+        body_rows = table.find_all("tr")
+        row_bonus = max(0, len(body_rows) - 1) / 50.0
+        score += row_bonus
+
+        if score > best_score:
+            best_score = score
+            best_table = (headers, table)
+
+    if not best_table:
+        return None
+
+    headers, table = best_table
+    rows = []
+    for tr in table.find_all("tr"):
+        cells = [td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"])]
+        if cells and len(cells) == len(headers) and all(normalize_header(cells[i]) == normalize_header(headers[i]) for i in range(len(headers))):
+            continue
+        if tr.find("td"):
+            rows.append(cells)
+
+    return headers, rows
+
+def extract_participants_from_soup(soup: BeautifulSoup) -> List[Participant]:
+    results: List[Participant] = []
+    found = find_results_table(soup)
+    if not found:
+        return results
+    headers, rows = found
+    col_map = guess_column_map(headers)
+
+    for row in rows:
+        data: Dict[str, str] = {}
+        for i, cell in enumerate(row):
+            key = col_map.get(i)
+            if key:
+                data[key] = cell
+        raw_all = {normalize_header(headers[i]) if i < len(headers) else f"col_{i}": row[i] for i in range(min(len(headers), len(row)))}
+
+        p = Participant(
+            name=data.get("name"),
+            city=data.get("city"),
+            bib=data.get("bib"),
+            age_group=data.get("age_group"),
+            category=data.get("category"),
+            result=data.get("result"),
+            gender=data.get("gender"),
+            team=data.get("team"),
+            rank_overall=data.get("rank_overall"),
+            rank_gender=data.get("rank_gender"),
+            rank_category=data.get("rank_category"),
+            raw=raw_all
+        )
+        results.append(p)
+    return results
+
+def find_next_page_url(soup: BeautifulSoup, current_url: str) -> Optional[str]:
+    candidates = []
+    for a in soup.find_all("a", href=True):
+        text = (a.get_text(" ", strip=True) or "").lower()
+        if any(h in text for h in {"следующая","вперёд","вперед","далее","next","older","more","»","›"}):
+            candidates.append(urljoin(current_url, a["href"]))
+    if candidates:
+        return candidates[0]
+
+    parsed = urlparse(current_url)
+    qs = parse_qs(parsed.query)
+    if "page" in qs:
+        try:
+            cur = int(qs["page"][0])
+            qs["page"] = [str(cur + 1)]
+            new_query = urlencode({k: v[0] if isinstance(v, list) and len(v) == 1 else v for k, v in qs.items()}, doseq=True)
+            return urlunparse(parsed._replace(query=new_query))
+        except Exception:
+            pass
+    return None
+
+def fetch_html(url: str, headers: Optional[Dict[str, str]] = None, timeout: int = 30) -> str:
+    default_headers = {
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    }
+    if headers:
+        default_headers.update(headers)
+    resp = requests.get(url, headers=default_headers, timeout=timeout)
+    resp.raise_for_status()
+    return resp.text
+
+def crawl_results(start_url: str, max_pages: int = 50) -> List[Participant]:
+    url = start_url
+    all_participants: List[Participant] = []
+    visited = set()
+    pages = 0
+
+    while url and pages < max_pages and url not in visited:
+        visited.add(url)
+        html = fetch_html(url)
+        soup = BeautifulSoup(html, "html.parser")
+        page_participants = extract_participants_from_soup(soup)
+        all_participants.extend(page_participants)
+        url = find_next_page_url(soup, url)
+        pages += 1
+
+    return all_participants
+
+def save_csv(participants: List[Participant], path: str) -> None:
+    fieldnames = ["name", "city", "bib", "age_group", "category", "result", "gender", "team",
+                  "rank_overall", "rank_gender", "rank_category"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(fieldnames + ["raw_all"])
+        for p in participants:
+            writer.writerow([
+                p.name, p.city, p.bib, p.age_group, p.category, p.result, p.gender, p.team,
+                p.rank_overall, p.rank_gender, p.rank_category, str(p.raw or {})
+            ])
+
+def main():
+    parser = argparse.ArgumentParser(description="Парсер списков участников/результатов (Алматы/Туркестан и др.)")
+    parser.add_argument("--url", required=True, help="URL страницы результатов или списка участников")
+    parser.add_argument("--out", default="participants.csv", help="Путь к выходному CSV-файлу")
+    parser.add_argument("--max-pages", type=int, default=50, help="Максимум страниц для обхода (по умолчанию 50)")
+    parser.add_argument("--dry-run", action="store_true", help="Не сохранять CSV, только показать статистику по найденным колонкам/строкам")
+    args = parser.parse_args()
+
+    participants = crawl_results(args.url, max_pages=args.max_pages)
+
+    if args.dry_run:
+        print(f"Найдено строк: {len(participants)}")
+        if participants:
+            # Соберём все ключи в raw
+            sample_raw_keys = set()
+            for p in participants[:50]:
+                if p.raw:
+                    sample_raw_keys.update(p.raw.keys())
+            print("Примеры распознанных заголовков:", ", ".join(sorted(sample_raw_keys)))
+            # Показать первые 5 записей
+            for i, p in enumerate(participants[:5], 1):
+                print(f"{i}. name={p.name!r}, city={p.city!r}, bib={p.bib!r}, category={p.category!r}, result={p.result!r}")
+        return
+
+    save_csv(participants, args.out)
+    print(f"Готово! Сохранено {len(participants)} записей в {args.out}")
+
+if __name__ == "__main__":
+    main()

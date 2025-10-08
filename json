@@ -2,24 +2,24 @@
 	  "kk": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
 	  "ru": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}]}' as payload_child
 
-
-jsonb_build_object(
-  'en', jsonb_build_array(
-           jsonb_build_object(
-             'path', jsonb_build_array('notes', 0, 'title'),
-             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
-           )
-         ),
-  'kk', jsonb_build_array(
-           jsonb_build_object(
-             'path', jsonb_build_array('notes', 0, 'title'),
-             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
-           )
-         ),
-  'ru', jsonb_build_array(
-           jsonb_build_object(
-             'path', jsonb_build_array('notes', 0, 'title'),
-             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
-           )
-         )
+JSON_OBJECT(
+  'en' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
+    )
+  ),
+  'kk' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
+    )
+  ),
+  'ru' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
+    )
+  )
+  RETURNING CLOB   -- если нужно вернуть CLOB (удобно для длинных JSON)
 ) AS payload_child

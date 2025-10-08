@@ -1,0 +1,3 @@
+'{"en": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
+	  "kk": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
+	  "ru": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}]}' as payload_child

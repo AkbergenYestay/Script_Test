@@ -1,3 +1,25 @@
 '{"en": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
 	  "kk": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
 	  "ru": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}]}' as payload_child
+
+
+jsonb_build_object(
+  'en', jsonb_build_array(
+           jsonb_build_object(
+             'path', jsonb_build_array('notes', 0, 'title'),
+             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
+           )
+         ),
+  'kk', jsonb_build_array(
+           jsonb_build_object(
+             'path', jsonb_build_array('notes', 0, 'title'),
+             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
+           )
+         ),
+  'ru', jsonb_build_array(
+           jsonb_build_object(
+             'path', jsonb_build_array('notes', 0, 'title'),
+             'replacements', jsonb_build_object('%(merchant)', top_freq_merchant_name)
+           )
+         )
+) AS payload_child

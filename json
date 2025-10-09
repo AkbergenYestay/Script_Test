@@ -1,9 +1,81 @@
-'{"en":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}],
-	"kk":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}],
-	"ru":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
-	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}]}'
+JSON_OBJECT(
+  'en' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP1_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 1, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP2_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 2, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP3_TRANSACTION_AMT,
+        '%(currency)' VALUE '$',
+        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT
+      )
+    )
+  ),
+  'kk' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP1_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 1, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP2_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 2, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP3_TRANSACTION_AMT,
+        '%(currency)' VALUE '$',
+        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT
+      )
+    )
+  ),
+  'ru' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP1_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 1, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP2_TRANSACTION_AMT,
+        '%(currency)' VALUE '₸',
+        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT
+      )
+    ),
+    JSON_OBJECT(
+      'path'         VALUE JSON_ARRAY('notes', 2, 'title'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(amount)'   VALUE TOP3_TRANSACTION_AMT,
+        '%(currency)' VALUE '$',
+        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT
+      )
+    )
+  )
+  RETURNING CLOB   -- если JSON может быть большим
+) AS payload_child

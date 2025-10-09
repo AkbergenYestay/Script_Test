@@ -1,25 +1,9 @@
-'{"en": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
-	  "kk": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}],
-	  "ru": [{"path": ["notes",0,"title"], "replacements": {"%(merchant)": "' || top_freq_merchant_name || '"}}]}' as payload_child
-
-JSON_OBJECT(
-  'en' VALUE JSON_ARRAY(
-    JSON_OBJECT(
-      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
-      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
-    )
-  ),
-  'kk' VALUE JSON_ARRAY(
-    JSON_OBJECT(
-      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
-      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
-    )
-  ),
-  'ru' VALUE JSON_ARRAY(
-    JSON_OBJECT(
-      'path'         VALUE JSON_ARRAY('notes', 0, 'title'),
-      'replacements' VALUE JSON_OBJECT('%(merchant)' VALUE top_freq_merchant_name NULL ON NULL)
-    )
-  )
-  RETURNING CLOB   -- если нужно вернуть CLOB (удобно для длинных JSON)
-) AS payload_child
+'{"en":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}],
+	"kk":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}],
+	"ru":[{"path":["notes",0,"title"],"replacements":{"%(amount)":"'|| TOP1_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP1_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",1,"title"],"replacements":{"%(amount)":"'|| TOP2_TRANSACTION_AMT ||'","%(currency)":"₸","%(merchant)":"'|| TOP2_TRANSACTION_MERCHANT ||'"}},
+	 {"path":["notes",2,"title"],"replacements":{"%(amount)":"'|| TOP3_TRANSACTION_AMT ||'","%(currency)":"$","%(merchant)":"'|| TOP3_TRANSACTION_MERCHANT ||'"}}]}'

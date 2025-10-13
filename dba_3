@@ -1,0 +1,28 @@
+SELECT tb.owner,
+       tb.table_name,
+       ROUND(NVL(tb.bytes,0)/1024/1024,2)  AS table_mb_est,
+       ROUND(NVL(ixb.bytes,0)/1024/1024,2) AS index_mb_est,
+       ROUND((NVL(tb.bytes,0)+NVL(ixb.bytes,0))/1024/1024,2) AS total_mb_est_no_lob
+FROM   (
+  SELECT owner, table_name, (tbl_blocks * ts_block_size) AS bytes FROM (
+    SELECT at.owner, at.table_name, NVL(at.blocks,0) tbl_blocks,
+           NVL(uts.block_size,8192) ts_block_size
+    FROM   all_tables at
+    LEFT JOIN user_tablespaces uts ON uts.tablespace_name = at.tablespace_name
+    WHERE  at.owner LIKE :p_owner
+  )
+) tb
+LEFT JOIN (
+  SELECT owner, table_name, SUM(leaf_blocks * ts_block_size) AS bytes
+  FROM (
+    SELECT ai.table_owner owner, ai.table_name,
+           NVL(ai.leaf_blocks,0) leaf_blocks,
+           NVL(uts.block_size,8192) ts_block_size
+    FROM   all_indexes ai
+    LEFT JOIN user_tablespaces uts ON uts.tablespace_name = ai.tablespace_name
+    WHERE  ai.table_owner LIKE :p_owner
+  )
+  GROUP BY owner, table_name
+) ixb
+ON ixb.owner = tb.owner AND ixb.table_name = tb.table_name
+ORDER BY total_mb_est_no_lob DESC, tb.owner, tb.table_name;

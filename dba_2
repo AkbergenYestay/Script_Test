@@ -1,0 +1,39 @@
+-- Для своей схемы (быстрее всего):
+WITH
+tbl AS (
+  SELECT table_name FROM user_tables
+),
+lob_map AS (
+  SELECT table_name, segment_name lob_segment_name
+  FROM   user_lobs
+),
+tbl_lob_bytes AS (
+  SELECT t.table_name,
+         SUM(CASE WHEN s.segment_type LIKE 'TABLE%' THEN s.bytes ELSE 0 END) AS table_bytes,
+         SUM(CASE WHEN s.segment_type LIKE 'LOB%'   THEN s.bytes ELSE 0 END) AS lob_bytes
+  FROM   tbl t
+  JOIN   user_segments s
+         ON (s.segment_type LIKE 'TABLE%' AND s.segment_name IN (t.table_name))
+         OR (s.segment_type LIKE 'LOB%' AND s.segment_name IN (
+               SELECT lm.lob_segment_name FROM lob_map lm WHERE lm.table_name = t.table_name
+             ))
+  GROUP BY t.table_name
+),
+idx_bytes AS (
+  SELECT i.table_name,
+         SUM(s.bytes) AS index_bytes
+  FROM   user_indexes i
+  JOIN   user_segments s
+         ON s.segment_name = i.index_name
+         AND s.segment_type IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION')
+  GROUP BY i.table_name
+)
+SELECT t.table_name,
+       ROUND(NVL(tl.table_bytes,0)/1024/1024,2) AS table_mb,
+       ROUND(NVL(tl.lob_bytes,0)/1024/1024,2)   AS lob_mb,
+       ROUND(NVL(ix.index_bytes,0)/1024/1024,2) AS index_mb,
+       ROUND((NVL(tl.table_bytes,0)+NVL(tl.lob_bytes,0)+NVL(ix.index_bytes,0))/1024/1024,2) AS total_mb
+FROM   user_tables t
+LEFT JOIN tbl_lob_bytes tl ON tl.table_name = t.table_name
+LEFT JOIN idx_bytes     ix ON ix.table_name = t.table_name
+ORDER  BY total_mb DESC, t.table_name;

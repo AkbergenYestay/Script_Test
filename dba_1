@@ -1,0 +1,92 @@
+-- === Параметры ===
+-- :p_owner  — схема (или шаблон). Примеры: 'HR' или 'SCOTT' или '%'
+-- :p_min_mb — минимальный размер таблицы в МБ для фильтра (например 1)
+
+VAR p_owner VARCHAR2(128);
+VAR p_min_mb NUMBER;
+
+BEGIN
+  :p_owner  := '%';  -- укажите схему, например 'HR'
+  :p_min_mb := 0;    -- минимальный размер в МБ
+END;
+/
+
+WITH
+-- Все таблицы выбранных схем
+tabs AS (
+  SELECT owner, table_name
+  FROM   dba_tables
+  WHERE  owner LIKE :p_owner
+),
+
+-- Карта LOB-сегментов (LOBSEGMENT/LOB PARTITION привяжем к таблице)
+lob_map AS (
+  SELECT owner,
+         table_name,
+         segment_name AS lob_segment_name
+  FROM   dba_lobs
+),
+
+-- Байты всех табличных и LOB-сегментов в разрезе таблиц
+tbl_lob_bytes AS (
+  SELECT t.owner,
+         t.table_name,
+         SUM(CASE WHEN s.segment_type LIKE 'TABLE%' THEN s.bytes ELSE 0 END) AS table_bytes,
+         SUM(CASE WHEN s.segment_type LIKE 'LOB%'   THEN s.bytes ELSE 0 END) AS lob_bytes
+  FROM   tabs t
+  JOIN   dba_segments s
+         ON s.owner = t.owner
+         AND (
+              -- Непартиц. и партиц. таблицы: у партиций segment_name = имени партиции,
+              -- но у TABLE% тип всё равно табличный, поэтому связываем через имя таблицы:
+              (s.segment_type LIKE 'TABLE%' AND s.segment_name IN (
+                  -- непартиц. сегмент может совпадать с именем таблицы
+                  t.table_name
+                  -- партиции/субпартиции не совпадают по имени, но это ок:
+                  -- мы учитываем все TABLE% сегменты данной схемы, далее отфильтровав по owner.
+              ))
+              OR
+              -- Все LOB-сегменты, принадлежащие колонкам таблицы
+              (s.segment_type LIKE 'LOB%' AND s.segment_name IN (
+                 SELECT lm.lob_segment_name
+                 FROM   lob_map lm
+                 WHERE  lm.owner = t.owner
+                 AND    lm.table_name = t.table_name
+              ))
+         )
+  GROUP BY t.owner, t.table_name
+),
+
+-- Байты индексов в разрезе таблиц (включая партиции индексов)
+idx_bytes AS (
+  SELECT i.table_owner AS owner,
+         i.table_name,
+         SUM(s.bytes) AS index_bytes
+  FROM   dba_indexes i
+  JOIN   dba_segments s
+         ON s.owner = i.owner
+         AND s.segment_name = i.index_name
+         AND s.segment_type IN ('INDEX','INDEX PARTITION','INDEX SUBPARTITION')
+  WHERE  i.table_owner LIKE :p_owner
+  GROUP BY i.table_owner, i.table_name
+)
+
+SELECT x.owner,
+       x.table_name,
+       ROUND(NVL(tl.table_bytes,0) / 1024/1024, 2) AS table_mb,
+       ROUND(NVL(tl.lob_bytes,  0) / 1024/1024, 2) AS lob_mb,
+       ROUND(NVL(ix.index_bytes,0)/ 1024/1024, 2) AS index_mb,
+       ROUND( (NVL(tl.table_bytes,0)+NVL(tl.lob_bytes,0)+NVL(ix.index_bytes,0)) / 1024/1024, 2) AS total_mb,
+       -- Для удобства: таблиスペйс, строки и блоки (могут быть полезны для диагностики)
+       t.tablespace_name,
+       t.num_rows,
+       t.blocks
+FROM   tabs x
+LEFT JOIN tbl_lob_bytes tl
+       ON tl.owner = x.owner AND tl.table_name = x.table_name
+LEFT JOIN idx_bytes ix
+       ON ix.owner = x.owner AND ix.table_name = x.table_name
+LEFT JOIN dba_tables t
+       ON t.owner = x.owner AND t.table_name = x.table_name
+WHERE  (NVL(tl.table_bytes,0)+NVL(tl.lob_bytes,0)+NVL(ix.index_bytes,0)) / 1024/1024 >= :p_min_mb
+ORDER  BY total_mb DESC, x.owner, x.table_name;

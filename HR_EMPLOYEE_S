@@ -1,0 +1,28 @@
+select /*+ parallel(4) */
+distinct mdmsub.public_id,
+         CASE
+           WHEN emp.EMPLOYEE_CATEGORY = 41 THEN
+            1
+           ELSE
+            0
+         END AS flag_position,
+         0 AS flag_iin
+  from dds.mdm_subject_l mdml,
+       dds.mdm_subject_s mdmsub,
+       (select gm.DWH_ID, gm.IIN_BIN, hr.EMPLOYEE_CATEGORY
+          from dds.GM_SUBJECT_H gm,
+               (select distinct IIN_BIN, hr.EMPLOYEE_CATEGORY
+                  from dds.HR_EMPLOYEE_S hr
+                 where hr.IS_ACTUAL = 'A'
+                   and hr.IS_FIRED = 0
+                   and hr.IIN_BIN is not null) hr
+         where GM_SYSTEM_CODE = 'W4'
+           and gm.IIN_BIN = hr.IIN_BIN) emp
+ where mdml.DATE_VALUE = to_date('13.10.2025', 'dd.mm.yyyy')
+   and mdml.eng_source_system_code = 'W4'
+   and mdml.party_main_type_code = 'ФИЗИЧЕСКОЕ_ЛИЦО'
+   and mdml.mdm_subject_id = mdmsub.dwh_id
+   and mdmsub.ENG_ACTIVE = 1
+   and GM_SUBJECT_ID <> -1
+   and mdmsub.IS_ACTUAL = 'A'
+   and mdml.GM_SUBJECT_ID = emp.DWH_ID 

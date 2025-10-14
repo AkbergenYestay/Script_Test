@@ -1,28 +1,38 @@
-select /*+ parallel(4) */
-distinct mdmsub.public_id,
-         CASE
-           WHEN emp.EMPLOYEE_CATEGORY = 41 THEN
-            1
-           ELSE
-            0
-         END AS flag_position,
-         0 AS flag_iin
-  from dds.mdm_subject_l mdml,
-       dds.mdm_subject_s mdmsub,
-       (select gm.DWH_ID, gm.IIN_BIN, hr.EMPLOYEE_CATEGORY
-          from dds.GM_SUBJECT_H gm,
-               (select distinct IIN_BIN, hr.EMPLOYEE_CATEGORY
-                  from dds.HR_EMPLOYEE_S hr
-                 where hr.IS_ACTUAL = 'A'
-                   and hr.IS_FIRED = 0
-                   and hr.IIN_BIN is not null) hr
-         where GM_SYSTEM_CODE = 'W4'
-           and gm.IIN_BIN = hr.IIN_BIN) emp
- where mdml.DATE_VALUE = to_date('13.10.2025', 'dd.mm.yyyy')
-   and mdml.eng_source_system_code = 'W4'
-   and mdml.party_main_type_code = 'ФИЗИЧЕСКОЕ_ЛИЦО'
-   and mdml.mdm_subject_id = mdmsub.dwh_id
-   and mdmsub.ENG_ACTIVE = 1
-   and GM_SUBJECT_ID <> -1
-   and mdmsub.IS_ACTUAL = 'A'
-   and mdml.GM_SUBJECT_ID = emp.DWH_ID 
+WITH emp AS (
+    SELECT gm.DWH_ID,
+           gm.IIN_BIN,
+           hr.EMPLOYEE_CATEGORY
+    FROM dds.GM_SUBJECT_H gm
+    JOIN (
+        SELECT DISTINCT IIN_BIN, EMPLOYEE_CATEGORY
+        FROM dds.HR_EMPLOYEE_S
+        WHERE IS_ACTUAL = 'A'
+          AND IS_FIRED  = 0
+          AND IIN_BIN IS NOT NULL
+    ) hr
+      ON gm.IIN_BIN = hr.IIN_BIN
+    WHERE gm.GM_SYSTEM_CODE = 'W4'
+),
+base AS (
+    SELECT /*+ parallel(4) */
+           DISTINCT
+           mdmsub.public_id,
+           emp.IIN_BIN,
+           CASE WHEN emp.EMPLOYEE_CATEGORY = 41 THEN 1 ELSE 0 END AS flag_position
+    FROM dds.mdm_subject_l mdml
+    JOIN dds.mdm_subject_s mdmsub
+      ON mdml.mdm_subject_id = mdmsub.dwh_id
+    JOIN emp
+      ON mdml.GM_SUBJECT_ID = emp.DWH_ID
+    WHERE mdml.DATE_VALUE             = TO_DATE('13.10.2025', 'dd.mm.yyyy')
+      AND mdml.eng_source_system_code = 'W4'
+      AND mdml.party_main_type_code   = 'ФИЗИЧЕСКОЕ_ЛИЦО'
+      AND mdmsub.ENG_ACTIVE           = 1
+      AND mdmsub.IS_ACTUAL            = 'A'
+      AND mdml.GM_SUBJECT_ID         <> -1
+)
+SELECT
+    b.public_id,
+    b.flag_position,
+    COUNT(*) OVER (PARTITION BY b.IIN_BIN) AS flag_iin  -- кол-во public_id на 1 IIN
+FROM base b;

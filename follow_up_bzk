@@ -1,0 +1,208 @@
+WITH 
+  DAT1 AS (
+    SELECT /*+ PARALLEL(5) */
+     DM.IIN, MAX(DM.PROCESSCREATE) AS MAX_PROCESSCREATE
+      FROM DDS.CMD_CCE_PROCESSES_FL DM --ACRM_DW.DM_PROCESSES DM
+     WHERE DM.PROCESS_REF LIKE 'EKP%'
+       AND DM.CREDIT_PRODUCT_TYPE = 'loan'
+       AND DM.PROCESSCREATE >= to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') - 30
+          --AND DM.DM_REQUEST_XML IS NOT NULL
+       AND NOT EXISTS (SELECT 1
+              FROM DDS.HR_EMPLOYEE_S
+             WHERE IS_ACTUAL = 'A'
+               AND IS_FIRED = 0
+               AND IIN_BIN = DM.IIN)
+     GROUP BY DM.IIN
+  ),
+  DAT2 AS (
+   SELECT DM.PROCESSID as ID, --DM.ID, 
+          DM.ORDERID,
+          DM.PROCESS_REF,
+          DM.IIN,
+          DM.PROCESSCREATE,
+          DM.REQUEST_AMOUNT,
+          DM.AMOUNT_DURATION
+     FROM DDS.CMD_CCE_PROCESSES_FL DM, --ACRM_DW.DM_PROCESSES DM 
+          DAT1                     D1
+    WHERE DM.IIN = D1.IIN
+      AND DM.PROCESSCREATE = D1.MAX_PROCESSCREATE
+  ),
+  DAT3 AS (
+    SELECT DMR.ID,
+           DMR.PROCESSID,
+           ROW_NUMBER() OVER(PARTITION BY DMR.PROCESSID ORDER BY DMR.DATE_CREATE DESC) AS RN
+      FROM DDS.CMD_CCE_RESPONSES_FL DMR, --ACRM_DW.DM_RESPONSES DMR
+           DAT2                     D
+     WHERE D.ID = DMR.PROCESSID
+       AND DMR.DATE_CREATE >= to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') - 30 --TRUNC(SYSDATE) - 30
+  ),
+  DAT4 AS ( 
+   SELECT D3.ID, D3.PROCESSID FROM DAT3 D3 WHERE D3.RN = 1
+  ),
+  DAT04 AS (
+    SELECT dps.PROCESSID, -- DPS.Response_Id,
+           CASE
+             WHEN DPS.Param_Value = '1' THEN
+              'online'
+             WHEN DPS.PARAM_VALUE = '0' THEN
+              'offline'
+             ELSE
+              'NaN'
+           END AS CHANNEL
+      FROM DDS.CMD_CCE_PARAMETER_SET_FL DPS, --ACRM_DW.Dm_Parameter_Set DPS
+           DAT4                         D4
+     WHERE dps.PROCESSID = d4.PROCESSID --DPS.RESPONSE_ID = D4.ID
+       AND UPPER(DPS.Param_Key) = 'ISONLINE'
+  ),
+  DAT5 AS (
+    SELECT DO.RESPONSEID,
+           MAX(CASE
+                 WHEN DO.OFFER_TYPE = '2' THEN
+                  4
+                 WHEN DO.OFFER_TYPE = '1' THEN
+                  3
+                 WHEN DO.OFFER_TYPE = '3' THEN
+                  2
+                 WHEN DO.OFFER_TYPE = '4' THEN
+                  1
+               END) AS MAX_OFFER_TYPE
+      FROM DDS.CMD_CCE_OFFERS_FL DO, --ACRM_DW.DM_OFFERS
+           DAT4                  D4
+     WHERE DO.RESPONSEID = D4.ID
+     GROUP BY DO.RESPONSEID
+  ),
+  DAT6 AS (
+    SELECT DO.RESPONSEID,
+           DO.OFFER_TYPE,
+           DO.AMOUNT,
+           DO.PAYMENT,
+           DO.RATE,
+           DO.TERM,
+           DO.RATE_EFFECTIVE,
+           DO.KDN
+      FROM DDS.CMD_CCE_OFFERS_FL DO --ACRM_DW.DM_OFFERS
+      JOIN DAT5 D5
+        ON DO.RESPONSEID = D5.RESPONSEID
+       AND (((DO.OFFER_TYPE = '2') AND (D5.MAX_OFFER_TYPE = 4)) OR
+           ((DO.OFFER_TYPE = '1') AND (D5.MAX_OFFER_TYPE = 3)) OR
+           ((DO.OFFER_TYPE = '3') AND (D5.MAX_OFFER_TYPE = 2)) OR
+           ((DO.OFFER_TYPE = '4') AND (D5.MAX_OFFER_TYPE = 1)))
+  ),
+  DAT7 AS (
+    SELECT D2.PROCESSCREATE, D2.ORDERID, s.CONTRACT_NUMBER AS NUM_DOG
+    /*NVL(RAL.NUM_DOG, ND.XR_NCRD) AS NUM_DOG8*/
+      FROM DAT2 D2
+      LEFT JOIN DDS.RS_CR_CONTRACT_SCD_S s
+        ON D2.ORDERID = TRIM(LTRIM(s.HL_CODE, 'SR HBR1'))
+       AND to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') BETWEEN s.DATE_BEGIN AND
+           s.DATE_END
+    /*LEFT JOIN ACRM_DW.appl_num_dog ND ON D2.PROCESS_REF = ND.XR_NDLPCR
+    LEFT JOIN ACRM_DW.RS_APPL_LOAN RAL ON RAL.APPL_ID = D2.ORDERID*/
+  ),
+  DAT8 AS (
+    SELECT RPI.IIN_BIN,
+           RPI.DWH_ID AS DWH_ID, --P_SID
+           RPI.LAST_NAME,
+           RPI.MIDDLE_NAME,
+           RPI.FIRST_NAME,
+           RPI.BIRTH_DATE
+      FROM DDS.OCRM_RB_SUBJECT_S RPI, --ACRM_DW.Rb_Person_Individual RPI
+           DAT1                  D1
+     WHERE RPI.IIN_BIN = D1.IIN
+       AND RPI.DATE_BEGIN <= to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') --TRUNC(SYSDATE) --DATE_FROM 
+       AND RPI.DATE_END >= to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') --TRUNC(SYSDATE) --DATE_UNTIL
+  ),
+  DAT9 AS (
+    SELECT D2.PROCESS_REF,
+           D2.IIN,
+           D8.DWH_ID AS DWH_ID, --D8.P_SID
+           D04.CHANNEL,
+           D2.PROCESSCREATE,
+           D2.REQUEST_AMOUNT,
+           D2.AMOUNT_DURATION AS REQUEST_TERM,
+           DR.CALL_NUM,
+           DR.RESPONSE_RESULT,
+           D7.NUM_DOG,
+           D6.OFFER_TYPE,
+           CASE
+             WHEN SUBSTR(D2.PROCESS_REF, 1, 3) <> 'CCC' THEN
+              ROUND((D6.PAYMENT /
+                    NULLIF(((NULLIF(D6.RATE, 0) / 1200) *
+                            power((1 + (NULLIF(D6.RATE, 0) / 1200)), D6.TERM) /
+                            (power((1 + (NULLIF(D6.RATE, 0) / 1200)), D6.TERM) - 1)),
+                            0)) / 1000,
+                    0) * 1000
+             ELSE
+              D6.AMOUNT
+           END AS APPROVED_SUM,
+           D6.PAYMENT AS APPROVED_MONTHLY_PAYMENT,
+           D6.RATE AS APPROVED_RATE,
+           D6.TERM AS APPROVED_TERM,
+           D6.RATE_EFFECTIVE,
+           D6.KDN,
+           ROW_NUMBER() OVER(PARTITION BY D2.PROCESS_REF ORDER BY D6.KDN ASC) as RN
+      FROM DAT2 D2
+      JOIN DAT4 D4
+        ON D2.ID = D4.PROCESSID
+      JOIN DDS.CMD_CCE_RESPONSES_FL DR --ACRM_DW.DM_RESPONSES DR 
+        ON D2.ID = DR.PROCESSID
+       AND D2.ID = DR.PROCESSID
+      JOIN DAT04 D04
+        ON D04.PROCESSID = DR.PROCESSID --DR.ID
+      JOIN DAT6 D6
+        ON D6.RESPONSEID = DR.ID
+      JOIN DAT7 D7
+        ON D7.ORDERID = D2.ORDERID
+      JOIN DAT8 D8
+        ON D8.IIN_BIN = D2.IIN
+     WHERE DR.RESPONSE_RESULT = '1'
+          --AND D7.NUM_DOG IS NULL
+       AND D6.RATE > 0
+  ),
+  tel as (
+    SELECT COMMUNICATION_TYPE,
+           COMMUNICATION_VALUE,
+           --IIN,
+           DWH_ID
+      from (SELECT ROW_NUMBER() over(PARTITION BY ct.CLIENTID ORDER BY ct.DATE_CHANGE) AS rn,
+                    CLIENTID,
+                    COMMUNICATION_TYPE,
+                    COMMUNICATION_VALUE,
+                    DWH_ID --P_SID
+               FROM DDS.OCRM_RB_SUBJECT_CONTACT_S ct --ACRM_DW.RB_PERSON_INDIVIDUAL_CONTACT ct
+              WHERE /*DATE_UNTIL*/
+              DATE_END >= to_date('01.01.3000', 'dd.mm.yyyy')
+           AND COMMUNICATION_TYPE in ('Доверенный номер')
+           AND (ct.MAIN_FL = '1' or ct.CONTACT_STATUS = 'Актуален' or --SIGN_MAIN
+              ct.ACTUAL_FL = '1') --SIGN_ACTUAL
+             --AND SIGN_DELETED is null AND IIN is not NULL
+             )
+     WHERE rn = 1
+  )
+SELECT /*+ PARALLEL(5) */
+   distinct 
+   D9.PROCESS_REF,
+   D9.IIN,
+   D9.DWH_ID, --D9.P_SID
+   D9.CHANNEL,
+   D9.PROCESSCREATE,
+   D9.REQUEST_AMOUNT,
+   D9.REQUEST_TERM,
+   D9.APPROVED_SUM,
+   D9.APPROVED_MONTHLY_PAYMENT,
+   D9.APPROVED_RATE,
+   D9.APPROVED_TERM,
+   tel.COMMUNICATION_VALUE,
+         
+   to_date('$$SNAPSHOT_DATE', 'dd.mm.yyyy') as snapshot_date,
+   trunc(sysdate) as upload_date,
+   CASE
+     WHEN D9.APPROVED_SUM >= D9.REQUEST_AMOUNT THEN
+      'ROBOT'
+     ELSE
+      'TM'
+   END AS TM_IVR
+  FROM DAT9 D9
+  LEFT JOIN tel
+    on tel.DWH_ID = d9.DWH_ID --tel.IIN = d9.IIN and tel.P_SID = d9.P_SID
+ WHERE D9.RN = 1

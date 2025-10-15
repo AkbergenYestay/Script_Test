@@ -14,6 +14,7 @@ WITH emp AS (
     WHERE gm.GM_SYSTEM_CODE = 'W4'
 ),
 base AS (
+    -- Дедуп: одна строка на пару (public_id, IIN_BIN)
     SELECT /*+ parallel(4) */
            DISTINCT
            mdmsub.public_id,
@@ -30,9 +31,17 @@ base AS (
       AND mdmsub.ENG_ACTIVE           = 1
       AND mdmsub.IS_ACTUAL            = 'A'
       AND mdml.GM_SUBJECT_ID         <> -1
+),
+cnt AS (
+    -- Считаем число public_id на каждый IIN
+    SELECT IIN_BIN, COUNT(*) AS flag_iin
+    FROM base
+    GROUP BY IIN_BIN
 )
 SELECT
     b.public_id,
     b.flag_position,
-    COUNT(*) OVER (PARTITION BY b.IIN_BIN) AS flag_iin  -- кол-во public_id на 1 IIN
-FROM base b;
+    c.flag_iin          AS flag_iin  -- количество public_id на этот IIN
+FROM base b
+JOIN cnt  c
+  ON c.IIN_BIN = b.IIN_BIN;

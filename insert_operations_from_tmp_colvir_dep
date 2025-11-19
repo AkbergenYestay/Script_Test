@@ -1,0 +1,136 @@
+-- DROP PROCEDURE cdo.insert_operations_from_tmp_colvir_dep(in date, in date, out int4, out int4, out text);
+
+CREATE OR REPLACE PROCEDURE cdo.insert_operations_from_tmp_colvir_dep(IN p_date_value_start date, IN p_date_value_end date, OUT p_rows_operations integer, OUT p_rows_cv_account integer, OUT p_error_message text)
+ LANGUAGE plpgsql
+AS $procedure$
+DECLARE
+BEGIN
+	p_rows_operations := 0;
+	p_rows_cv_account := 0;
+	p_error_message := NULL;
+	RAISE NOTICE 'Запуск insert_operations_from_tmp_colvir_dep для p_date_value_start = %s p_date_value_end = %s', 
+	p_date_value_start, p_date_value_end;
+
+	WITH src AS (  																					
+	    SELECT  
+	        case when "system" = 'COLVIR_DEPO' then 3 end system_type, 
+	        user_id,
+			currency,
+			date1,
+			amount_in_currency,
+			amount_kzt,
+			refer,
+			trn_id,
+			trn_doc_num,
+			from1,
+			income,
+			operaton_details,
+			iin,
+			nord,
+			code_st,
+			short_dscr,
+			state,
+			between_own_accounts,
+			snapshot_date,
+			date_value,
+			category_id,
+			subc.id as sub_category_id
+	    FROM cdo.tmp_colvir_dep 
+	    LEFT JOIN public.sub_categories subc  
+        --ON s.category_id::varchar = subc.id::varchar  
+    	ON s.category_id = subc.id
+	    WHERE date_value between p_date_value_start and p_date_value_end
+	),  
+	inserted_operations as (
+		INSERT INTO cdo.operations (  
+	        user_id,  
+	        "date",  
+	        income,  
+	        amount_in_currency,  
+	        system_type,  
+	        "from",  
+	        "to",  
+	        from_currency,  
+	        to_currency,  
+	        amount_kzt,  
+	        state,  
+	        fee,  
+	        category_id,
+	        sub_category_id,
+	        process_id,
+	        short_desc,  
+	        trans_type_name,  
+	        oper_id,
+	        nord,
+        	date_value  
+	    )
+	    SELECT  
+		    s.user_id,  
+		    s.date1 as "date",  
+		    CASE WHEN s.income = 1 THEN TRUE ELSE FALSE end as income,  
+		    s.amount_in_currency,  
+		    s.system as system_type,  
+		    s.from1 as from1,  
+		    s.from1 as to1,  
+		    s.currency as from_currency,  
+		    s.currency as to_currency,  
+		    s.amount_kzt,  
+		    s.state,  
+		    '' as fee,  
+		    s.category_id, 
+		    s.sub_category_id, 
+		    '' as process_id,
+		    s.short_dscr,  
+		    s.short_dscr as trans_type_name,  
+		    s.trn_id as oper_id,  
+		    s.nord,
+		    s.date_value  
+	    FROM src s   
+    	RETURNING sub_category_id, user_id, trn_id, date_value, nord
+	),
+	inserted_cv AS (  
+	    INSERT INTO cdo.colvir_dep_operations(
+	        operation_id,
+	    	operation_details,
+	    	trn_id,
+	    	refer,
+		    trn_doc_num,
+		    nord,
+		    between_own_accounts,
+		    code_st,
+		    operation_date
+	    )  
+    	SELECT 
+	        ins.sub_category_id as operation_id,  
+	        '' as operation_details,
+	        s.trn_id, 
+	        s.refer,
+	        s.trn_doc_num,  
+	        s.nord,
+	        s.between_own_accounts,
+	        s.code_st,
+	        s.date1 as operation_date
+	    FROM src s  
+	    JOIN inserted_operations ins  
+	      ON ins.user_id = s.user_id  
+	     AND ins.oper_id = s.trn_id
+	     and ins.date_value = s.date_value
+	     and ins.nord = s.nord
+	    RETURNING operation_id 
+	)
+	SELECT  
+	    (SELECT COUNT(*) FROM inserted_operations),  
+    	(SELECT COUNT(*) FROM inserted_cv)  
+	INTO p_rows_operations, p_rows_cv_account;  
+	
+	RAISE NOTICE 'Вставлено % записей в cdo.operations и % записей в cdo.cv_account_operations', p_rows_operations, p_rows_cv_account;
+EXCEPTION																											
+  WHEN OTHERS THEN
+	p_rows_operations := 0;
+	p_rows_cv_account := 0;
+	p_error_message := SQLERRM;
+
+RAISE NOTICE 'Ошибка при выполнении insert_operations_from_tmp: %', p_error_message;
+END;
+$procedure$
+;

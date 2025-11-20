@@ -1,3 +1,5 @@
+-- DROP PROCEDURE cdo.insert_operations_from_tmp_colvir_dep(in date, in date, out int4, out int4, out text);
+
 CREATE OR REPLACE PROCEDURE cdo.insert_operations_from_tmp_colvir_dep(
     IN  p_date_value_start date,
     IN  p_date_value_end   date,
@@ -7,7 +9,6 @@ CREATE OR REPLACE PROCEDURE cdo.insert_operations_from_tmp_colvir_dep(
 )
 LANGUAGE plpgsql
 AS $procedure$
-DECLARE
 BEGIN
     p_rows_operations := 0;
     p_rows_cv_account := 0;
@@ -18,7 +19,7 @@ BEGIN
         p_date_value_start, p_date_value_end;
 
     WITH src AS (
-        -- источник с выбором последнего snapshot по логической операции
+        -- Берём данные из tmp_colvir_dep и оставляем последний snapshot по логической операции
         SELECT *
         FROM (
             SELECT
@@ -44,30 +45,33 @@ BEGIN
                 tmp.date_value,
                 tmp.category_id,
                 subc.id                            AS sub_category_id,
-                row_number() over (
-                    partition by tmp.user_id, tmp.trn_id, tmp.nord, tmp.date_value
-                    order by tmp.snapshot_date desc
+                row_number() OVER (
+                    PARTITION BY tmp.user_id, tmp.trn_id, tmp.nord, tmp.date_value
+                    ORDER BY tmp.snapshot_date DESC
                 ) AS rn
             FROM cdo.tmp_colvir_dep tmp
             LEFT JOIN public.sub_categories subc
                    ON tmp.category_id = subc.id
             WHERE tmp.date_value BETWEEN p_date_value_start AND p_date_value_end
         ) t
-        WHERE t.rn = 1
+        WHERE t.rn = 1    -- только последняя версия операции
     ),
 
-    -- 1) операции, которых ещё нет в cdo.operations
+    -- Оставляем только те операции, которых ещё нет в cdo.operations
     src_for_operations AS (
         SELECT s.*
         FROM src s
-        LEFT JOIN cdo.operations o
-          ON  o.user_id    = s.user_id
-          AND o.oper_id    = s.trn_id
-          AND o.nord       = s.nord
-          AND o.date_value = s.date_value
-        WHERE o.id IS NULL         -- только новые логические операции
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM cdo.operations o
+            WHERE o.user_id    = s.user_id
+              AND o.oper_id    = s.trn_id
+              AND o.nord       = s.nord
+              AND o.date_value = s.date_value
+        )
     ),
 
+    -- Вставляем новые операции
     inserted_operations AS (
         INSERT INTO cdo.operations (
             user_id,
@@ -99,8 +103,8 @@ BEGIN
             s.system_type,
             s.from1,
             s.from1,
-            (replace(s.currency, ',', '.')::numeric)::smallint AS from_currency,
-            (replace(s.currency, ',', '.')::numeric)::smallint AS to_currency,
+            (REPLACE(s.currency, ',', '.')::numeric)::smallint AS from_currency,
+            (REPLACE(s.currency, ',', '.')::numeric)::smallint AS to_currency,
             s.amount_kzt,
             s.state,
             NULL AS fee,
@@ -108,18 +112,18 @@ BEGIN
             s.sub_category_id,
             NULL AS process_id,
             s.short_dscr,
-            s.short_dscr                            AS trans_type_name,
-            s.trn_id                                AS oper_id,
+            s.short_dscr                                    AS trans_type_name,
+            s.trn_id                                        AS oper_id,
             s.nord,
             s.date_value
         FROM src_for_operations s
-        RETURNING id, user_id, oper_id, nord, date_value
+        RETURNING id
     ),
 
-    -- 2) все операции (новые и старые), для которых ещё нет записи в colvir_dep_operations
-    ops_for_cv AS (
+    -- Для всех операций (и новых, и существующих) находим их id
+    src_with_operation_id AS (
         SELECT
-            o.id             AS operation_id,
+            o.id               AS operation_id,
             s.operation_details,
             s.trn_id,
             s.refer,
@@ -127,20 +131,18 @@ BEGIN
             s.nord,
             s.between_own_accounts,
             s.code_st,
-            s.date1         AS operation_date
+            s.date1            AS operation_date
         FROM src s
         JOIN cdo.operations o
-          ON  o.user_id    = s.user_id
-          AND o.oper_id    = s.trn_id
-          AND o.nord       = s.nord
-          AND o.date_value = s.date_value
-        LEFT JOIN cdo.colvir_dep_operations c
-          ON  c.operation_id = o.id
-        WHERE c.operation_id IS NULL      -- для этой операции ещё нет строки в colvir_dep_operations
+          ON o.user_id    = s.user_id
+         AND o.oper_id    = s.trn_id
+         AND o.nord       = s.nord
+         AND o.date_value = s.date_value
     ),
 
+    -- Вставляем детали операций в colvir_dep_operations, без дублей по operation_id
     inserted_cv AS (
-        INSERT INTO cdo.colvir_dep_operations(
+        INSERT INTO cdo.colvir_dep_operations (
             operation_id,
             operation_details,
             trn_id,
@@ -152,16 +154,17 @@ BEGIN
             operation_date
         )
         SELECT
-            f.operation_id,
-            f.operation_details,
-            f.trn_id,
-            f.refer,
-            f.trn_doc_num,
-            f.nord,
-            f.between_own_accounts,
-            f.code_st,
-            f.operation_date
-        FROM ops_for_cv f
+            sw.operation_id,
+            sw.operation_details,
+            sw.trn_id,
+            sw.refer,
+            sw.trn_doc_num,
+            sw.nord,
+            sw.between_own_accounts,
+            sw.code_st,
+            sw.operation_date
+        FROM src_with_operation_id sw
+        ON CONFLICT (operation_id) DO NOTHING
         RETURNING operation_id
     )
 

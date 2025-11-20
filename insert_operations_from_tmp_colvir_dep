@@ -13,32 +13,32 @@ BEGIN
 
 	WITH src AS (  																					
 	    SELECT  
-	        case when "system" = 'COLVIR_DEPO' then 3 end system_type, 
-	        user_id,
-			currency,
-			date1,
-			amount_in_currency,
-			amount_kzt,
-			refer,
-			trn_id,
-			trn_doc_num,
-			from1,
-			income,
-			operaton_details,
-			iin,
-			nord,
-			code_st,
-			short_dscr,
-			state,
-			between_own_accounts,
-			snapshot_date,
-			date_value,
-			category_id,
+	        case when tmp."system" = 'COLVIR_DEPO' then 4 end system_type, 
+		    tmp.user_id::uuid as user_id,
+			tmp.currency,
+			tmp.date1,
+			tmp.amount_in_currency,
+			tmp.amount_kzt,
+			tmp.refer,
+			tmp.trn_id,
+			tmp.trn_doc_num,
+			tmp.from1,
+			tmp.income,
+			tmp.operation_details,
+			tmp.iin,
+			tmp.nord,
+			tmp.code_st,
+			tmp.short_dscr,
+			tmp.state,
+			tmp.between_own_accounts,
+			tmp.snapshot_date,
+			tmp.date_value,
+			tmp.category_id,
 			subc.id as sub_category_id
-	    FROM cdo.tmp_colvir_dep 
+	    FROM cdo.tmp_colvir_dep tmp
 	    LEFT JOIN public.sub_categories subc  
         --ON s.category_id::varchar = subc.id::varchar  
-    	ON s.category_id = subc.id
+    	ON tmp.category_id = subc.id
 	    WHERE date_value between p_date_value_start and p_date_value_end
 	),  
 	inserted_operations as (
@@ -69,29 +69,29 @@ BEGIN
 		    s.date1 as "date",  
 		    CASE WHEN s.income = 1 THEN TRUE ELSE FALSE end as income,  
 		    s.amount_in_currency,  
-		    s.system as system_type,  
+		    s.system_type,  
 		    s.from1 as from1,  
 		    s.from1 as to1,  
-		    s.currency as from_currency,  
-		    s.currency as to_currency,  
+		    (replace(s.currency, ',', '.')::numeric) ::smallint as from_currency,  
+		    (replace(s.currency, ',', '.')::numeric) ::smallint as to_currency,  
 		    s.amount_kzt,  
 		    s.state,  
-		    '' as fee,  
+		    null as fee,  
 		    s.category_id, 
 		    s.sub_category_id, 
-		    '' as process_id,
+		    null as process_id,
 		    s.short_dscr,  
 		    s.short_dscr as trans_type_name,  
 		    s.trn_id as oper_id,  
 		    s.nord,
 		    s.date_value  
 	    FROM src s   
-    	RETURNING sub_category_id, user_id, trn_id, date_value, nord
+    	RETURNING id, user_id, oper_id, date_value, nord
 	),
 	inserted_cv AS (  
 	    INSERT INTO cdo.colvir_dep_operations(
 	        operation_id,
-	    	operation_details,
+	    	operation_details, 
 	    	trn_id,
 	    	refer,
 		    trn_doc_num,
@@ -101,8 +101,8 @@ BEGIN
 		    operation_date
 	    )  
     	SELECT 
-	        ins.sub_category_id as operation_id,  
-	        '' as operation_details,
+	        ins.id as operation_id,  
+	        s.operation_details,
 	        s.trn_id, 
 	        s.refer,
 	        s.trn_doc_num,  
@@ -114,8 +114,8 @@ BEGIN
 	    JOIN inserted_operations ins  
 	      ON ins.user_id = s.user_id  
 	     AND ins.oper_id = s.trn_id
-	     and ins.date_value = s.date_value
-	     and ins.nord = s.nord
+	    -- and ins.nord = s.nord
+	    -- and ins.trn_doc_num = s.trn_doc_num
 	    RETURNING operation_id 
 	)
 	SELECT  
@@ -123,7 +123,7 @@ BEGIN
     	(SELECT COUNT(*) FROM inserted_cv)  
 	INTO p_rows_operations, p_rows_cv_account;  
 	
-	RAISE NOTICE 'Вставлено % записей в cdo.operations и % записей в cdo.cv_account_operations', p_rows_operations, p_rows_cv_account;
+	RAISE NOTICE 'Вставлено % записей в cdo.operations и % записей в cdo.colvir_dep_operations', p_rows_operations, p_rows_cv_account;
 EXCEPTION																											
   WHEN OTHERS THEN
 	p_rows_operations := 0;

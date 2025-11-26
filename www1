@@ -1,0 +1,28 @@
+SELECT JSON_OBJECT(
+         'ru' VALUE JSON_ARRAY(
+                 JSON_OBJECT(
+                     'path' VALUE 'note',
+                     'replacements' VALUE JSON_OBJECT(
+                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
+                     )
+                 )
+               ),
+         'en' VALUE JSON_ARRAY(
+                 JSON_OBJECT(
+                     'path' VALUE 'note',
+                     'replacements' VALUE JSON_OBJECT(
+                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
+                     )
+                 )
+               ),
+         'kk' VALUE JSON_ARRAY(
+                 JSON_OBJECT(
+                     'path' VALUE 'note',
+                     'replacements' VALUE JSON_OBJECT(
+                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
+                     )
+                 )
+               )
+       ) AS payload
+FROM category_data cd
+WHERE rank_num = 1;

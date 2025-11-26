@@ -1,49 +1,81 @@
 JSON_OBJECT(
-  'en' VALUE JSON_ARRAY(
-    -- NEW: price.amount only
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','amount'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(priceValue)' VALUE ROUND(amount)
-      )
-    ),
-
-    -- NEW: price.currency only
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','currency'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(currency)' VALUE '₸'
-      )
-    )
-  ),
-
-  'ru' VALUE JSON_ARRAY(
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','amount'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(priceValue)' VALUE ROUND(amount)
-      )
-    ),
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','currency'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(currency)' VALUE '₸'
-      )
-    )
-  ),
-
-  'kk' VALUE JSON_ARRAY(
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','amount'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(priceValue)' VALUE ROUND(amount)
-      )
-    ),
-    JSON_OBJECT(
-      'path' VALUE JSON_ARRAY('price','currency'),
-      'replacements' VALUE JSON_OBJECT(
-        '%(currency)' VALUE '₸'
-      )
-    )
-  )
-) AS payload
+		  'en' VALUE JSON_ARRAY(
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 0, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP1_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 1, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP2_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 2, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP3_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    )
+		  ),
+		  'kk' VALUE JSON_ARRAY(
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 0, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP1_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 1, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP2_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 2, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP3_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    )
+		  ),
+		  'ru' VALUE JSON_ARRAY(
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 0, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP1_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP1_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 1, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP2_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP2_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    ),
+		    JSON_OBJECT(
+		      'path' VALUE JSON_ARRAY('notes', 2, 'title'),
+		      'replacements' VALUE JSON_OBJECT(
+		        '%(amount)'   VALUE round(TOP3_TRANSACTION_AMT),
+		        '%(currency)' VALUE '₸',
+		        '%(merchant)' VALUE TOP3_TRANSACTION_MERCHANT NULL ON NULL
+		      )
+		    )
+		  )
+		  RETURNING CLOB
+    ) AS payload 

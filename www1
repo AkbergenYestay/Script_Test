@@ -1,28 +1,49 @@
-SELECT JSON_OBJECT(
-         'ru' VALUE JSON_ARRAY(
-                 JSON_OBJECT(
-                     'path' VALUE 'note',
-                     'replacements' VALUE JSON_OBJECT(
-                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
-                     )
-                 )
-               ),
-         'en' VALUE JSON_ARRAY(
-                 JSON_OBJECT(
-                     'path' VALUE 'note',
-                     'replacements' VALUE JSON_OBJECT(
-                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
-                     )
-                 )
-               ),
-         'kk' VALUE JSON_ARRAY(
-                 JSON_OBJECT(
-                     'path' VALUE 'note',
-                     'replacements' VALUE JSON_OBJECT(
-                         '%(price)' VALUE TO_CHAR(ROUND(amount)) || ' ₸'
-                     )
-                 )
-               )
-       ) AS payload
-FROM category_data cd
-WHERE rank_num = 1;
+JSON_OBJECT(
+  'en' VALUE JSON_ARRAY(
+    -- NEW: price.amount only
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','amount'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(priceValue)' VALUE ROUND(amount)
+      )
+    ),
+
+    -- NEW: price.currency only
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','currency'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(currency)' VALUE '₸'
+      )
+    )
+  ),
+
+  'ru' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','amount'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(priceValue)' VALUE ROUND(amount)
+      )
+    ),
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','currency'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(currency)' VALUE '₸'
+      )
+    )
+  ),
+
+  'kk' VALUE JSON_ARRAY(
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','amount'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(priceValue)' VALUE ROUND(amount)
+      )
+    ),
+    JSON_OBJECT(
+      'path' VALUE JSON_ARRAY('price','currency'),
+      'replacements' VALUE JSON_OBJECT(
+        '%(currency)' VALUE '₸'
+      )
+    )
+  )
+) AS payload

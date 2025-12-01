@@ -1,37 +1,39 @@
 WITH maxval AS (
-  SELECT
-    MAX(date_value)   AS date_value,
-    MAX(report_id)    AS report_id,
-    iin
-  FROM DDS.PKB_CLIENT_REPORTS_FL t0
-  WHERE proc_status <> '1108'
-    AND TRUNC(date_change) <= TO_DATE(:snapshot_date, 'YYYY-MM-DD')
-  GROUP BY iin
+  SELECT date_value, report_id, iin
+  FROM (
+    SELECT t0.date_value,
+           t0.report_id,
+           t0.iin,
+           ROW_NUMBER() OVER (PARTITION BY t0.iin ORDER BY t0.date_value DESC, t0.report_id DESC) rn
+    FROM DDS.PKB_CLIENT_REPORTS_FL t0
+    WHERE proc_status <> '1108'
+      AND TRUNC(date_change) <= TO_DATE(:snapshot_date,'YYYY-MM-DD')
+  )
+  WHERE rn = 1
 ),
-pkb_tb AS (
-  SELECT
-    pcpf.contract_id,
-    pcpf.report_id,
-    MAX(pcpf.day_cnt) AS max_delay_day_cnt_2y,
-    MAX(pcpf.pay_sum) AS max_delay_amount_2y
-  FROM DDS.PKB_CONTRACT_PAYMENTS_FL pcpf
-  JOIN maxval m
-    ON m.date_value = pcpf.date_value
-   AND m.report_id = pcpf.report_id
-  WHERE
-    -- вычисляем первый день месяца как date и фильтруем по интервалу snapshot-730..snapshot
-    TO_DATE(
-      '01-' || LPAD(pcpf.monthno, 2, '0') || '-' ||
-      (CASE WHEN pcpf.year < 100 THEN (pcpf.year + 2000) ELSE pcpf.year END),
-      'DD-MM-YYYY'
-    ) BETWEEN TO_DATE(:snapshot_date, 'YYYY-MM-DD') - 730
-        AND TO_DATE(:snapshot_date, 'YYYY-MM-DD')
-  GROUP BY pcpf.contract_id, pcpf.report_id
+pkp_clean AS (
+  SELECT contract_id,
+         report_id,
+         day_cnt,
+         pay_sum,
+         date_value,
+         TO_DATE(
+           '01-' || LPAD(monthno,2,'0') || '-' ||
+           CASE WHEN year < 100 THEN TO_CHAR(year+2000) ELSE TO_CHAR(year) END,
+           'DD-MM-YYYY'
+         ) AS payment_date
+  FROM DDS.PKB_CONTRACT_PAYMENTS_FL
 )
 SELECT /*+ PARALLEL(8) */
-  contract_id,
-  report_id,
-  max_delay_day_cnt_2y,
-  max_delay_amount_2y,
-  TO_DATE(:snapshot_date, 'YYYY-MM-DD') AS snapshot
-FROM pkb_tb;
+  p.contract_id,
+  p.report_id,
+  MAX(p.day_cnt) AS max_delay_day_cnt_2y,
+  MAX(p.pay_sum) AS max_delay_amount_2y,
+  TO_DATE(:snapshot_date,'YYYY-MM-DD') AS snapshot
+FROM pkp_clean p
+JOIN maxval m
+  ON m.date_value = p.date_value
+ AND m.report_id  = p.report_id
+WHERE p.payment_date BETWEEN TO_DATE(:snapshot_date,'YYYY-MM-DD') - 730
+                        AND TO_DATE(:snapshot_date,'YYYY-MM-DD')
+GROUP BY p.contract_id, p.report_id;

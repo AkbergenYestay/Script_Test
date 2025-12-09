@@ -1,0 +1,67 @@
+select 
+    /*+ parallel(8)*/ 
+    iin,
+    percent_sum,  
+    cnt_mnth,
+    amount_month,
+   'depo_itog_proc' as product_code,
+   trunc(sysdate) as upload_date,
+   '{
+   "en": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
+        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
+        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}],
+   "kk": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
+        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
+        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}],
+   "ru": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
+        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
+        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}]
+  }' as payload 
+from (
+  select iin, 
+  count(distinct mnth) cnt_mnth,
+  round(sum(percent_sum)) percent_sum,
+  round(sum(percent_sum)/count(distinct mnth)) amount_month
+  from 
+  (select 
+  iin_bin iin,
+  trunc(ha.exec_date, 'mm') mnth,
+  AMOUNT_SUM_NAT percent_sum
+  from dds.RS_DS_ANL_HALFENTRY_FL ha
+  inner join dds.RS_PD_PAYMENT_FL pd on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
+  left join dds.gm_subject_h g on g.dwh_id = ha.gm_subject_id and g.gm_system_code = 'RS'
+  inner join dds.rs_ds_contract_scd_s ds on ha.rs_ds_contract_id = ds.dwh_id and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
+  inner join dds.rs_gm_product_h pr on ds.rs_gm_product_id = pr.dwh_id and pr.dwh_code in ('15735', '15900')
+  where 1 = 1
+    and ha.DATE_VALUE >=date '2025-01-01'
+    and ha.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
+    and pd.DATE_VALUE >= date '2025-01-01'
+    and pd.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
+    and ha.INCOM_FL = 0
+    and ha.NORD = 1
+    and lower(assign) like '%выплата%'
+     and (ds.close_date=ds.end_date
+      or ds.close_date is null)
+    
+  union all
+
+  select 
+    iin_bin iin, 
+    trunc(ha.exec_date, 'mm') mnth,
+    AMOUNT_SUM_NAT percent_sum
+    from dds.RS_DS_ANL_HALFENTRY_FL ha
+    inner join dds.RS_PD_PAYMENT_FL pd on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
+    left join dds.gm_subject_h g on g.dwh_id = ha.gm_subject_id and g.gm_system_code = 'RS'
+    inner join dds.rs_ds_contract_scd_s ds on ha.rs_ds_contract_id = ds.dwh_id and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
+    inner join dds.rs_gm_product_h pr on ds.rs_gm_product_id = pr.dwh_id and pr.dwh_code not in ('15735', '15900')
+    where 1 = 1
+      and ha.DATE_VALUE >= date '2025-01-01'
+      and ha.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
+      and pd.DATE_VALUE >=  date '2025-01-01'
+      and pd.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
+      and ha.INCOM_FL = 0
+      and ha.NORD = 1
+      and lower(assign) like '%выплата%'
+  )
+  group by iin
+)

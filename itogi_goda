@@ -1,67 +1,73 @@
-select 
-    /*+ parallel(8)*/ 
+/*+ parallel(8) */
+WITH base AS (
+  SELECT 
+    ha.iin_bin                          AS iin,
+    trunc(ha.exec_date, 'mm')          AS mnth,
+    ha.amount_sum_nat                  AS amt
+  FROM dds.rs_ds_anl_halfentry_fl ha
+  JOIN dds.rs_pd_payment_fl pd
+    ON ha.rs_ds_oper_source_id = pd.parent_processid
+   AND ha.rs_ds_oper_njrn       = pd.parent_process_njrn
+  JOIN dds.rs_ds_contract_scd_s ds
+    ON ha.rs_ds_contract_id = ds.dwh_id
+   AND ds.is_actual = 'A'
+  JOIN dds.rs_gm_product_h pr
+    ON ds.rs_gm_product_id = pr.dwh_id
+  -- убрал left join на gm_subject_h, т.к. он не используется в итогах; 
+  -- верните, если нужен для фильтрации/вложений
+  WHERE ha.date_value >= DATE '2025-01-01'
+    AND ha.date_value <  TRUNC(sysdate, 'mm')
+    AND pd.date_value >= DATE '2025-01-01'
+    AND pd.date_value <  TRUNC(sysdate, 'mm')
+    AND ha.incom_fl = 0
+    AND ha.nord    = 1
+    -- более быстрый эквивалент lower(...) like '%выплата%'
+    AND instr(upper(ha.assign), 'ВЫПЛАТ') > 0
+    -- условие по close_date как в исходнике
+    AND (ds.close_date = ds.end_date OR ds.close_date IS NULL)
+),
+agg AS (
+  SELECT
     iin,
-    percent_sum,  
-    cnt_mnth,
-    amount_month,
-   'depo_itog_proc' as product_code,
-   trunc(sysdate) as upload_date,
-   '{
-   "en": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
-        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
-        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}],
-   "kk": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
-        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
-        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}],
-   "ru": [ {"path": ["values", "total"], "replacements": {"%(amountTotal)":"'||percent_sum||'"}},
-        {"path": ["values", "currency"], "replacements": {"%(currency)":"KZT"}},
-        {"path": ["values", "month"], "replacements": {"%(amountMonth)":"'||amount_month||'"}}]
-  }' as payload 
-from (
-  select iin, 
-  count(distinct mnth) cnt_mnth,
-  round(sum(percent_sum)) percent_sum,
-  round(sum(percent_sum)/count(distinct mnth)) amount_month
-  from 
-  (select 
-  iin_bin iin,
-  trunc(ha.exec_date, 'mm') mnth,
-  AMOUNT_SUM_NAT percent_sum
-  from dds.RS_DS_ANL_HALFENTRY_FL ha
-  inner join dds.RS_PD_PAYMENT_FL pd on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-  left join dds.gm_subject_h g on g.dwh_id = ha.gm_subject_id and g.gm_system_code = 'RS'
-  inner join dds.rs_ds_contract_scd_s ds on ha.rs_ds_contract_id = ds.dwh_id and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-  inner join dds.rs_gm_product_h pr on ds.rs_gm_product_id = pr.dwh_id and pr.dwh_code in ('15735', '15900')
-  where 1 = 1
-    and ha.DATE_VALUE >=date '2025-01-01'
-    and ha.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
-    and pd.DATE_VALUE >= date '2025-01-01'
-    and pd.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
-    and ha.INCOM_FL = 0
-    and ha.NORD = 1
-    and lower(assign) like '%выплата%'
-     and (ds.close_date=ds.end_date
-      or ds.close_date is null)
-    
-  union all
-
-  select 
-    iin_bin iin, 
-    trunc(ha.exec_date, 'mm') mnth,
-    AMOUNT_SUM_NAT percent_sum
-    from dds.RS_DS_ANL_HALFENTRY_FL ha
-    inner join dds.RS_PD_PAYMENT_FL pd on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-    left join dds.gm_subject_h g on g.dwh_id = ha.gm_subject_id and g.gm_system_code = 'RS'
-    inner join dds.rs_ds_contract_scd_s ds on ha.rs_ds_contract_id = ds.dwh_id and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-    inner join dds.rs_gm_product_h pr on ds.rs_gm_product_id = pr.dwh_id and pr.dwh_code not in ('15735', '15900')
-    where 1 = 1
-      and ha.DATE_VALUE >= date '2025-01-01'
-      and ha.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
-      and pd.DATE_VALUE >=  date '2025-01-01'
-      and pd.DATE_VALUE < trunc(sysdate, 'mm') -- date '2025-09-01'
-      and ha.INCOM_FL = 0
-      and ha.NORD = 1
-      and lower(assign) like '%выплата%'
-  )
-  group by iin
+    COUNT(DISTINCT mnth)                AS cnt_mnth,
+    ROUND(SUM(amt))                     AS percent_sum,
+    ROUND( SUM(amt) / NULLIF(COUNT(DISTINCT mnth),0) ) AS amount_month
+  FROM base
+  GROUP BY iin
 )
+SELECT
+  /*+ parallel(8) */
+  a.iin,
+  a.percent_sum,
+  a.cnt_mnth,
+  a.amount_month,
+  'depo_itog_proc'                       AS product_code,
+  TRUNC(sysdate)                         AS upload_date,
+  /* Собираем JSON через JSON_OBJECT / JSON_ARRAY */
+  JSON_OBJECT(
+    'en' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE TO_CHAR(a.percent_sum))),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
+                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE TO_CHAR(a.amount_month)))
+    ),
+    'kk' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE TO_CHAR(a.percent_sum))),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
+                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE TO_CHAR(a.amount_month)))
+    ),
+    'ru' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE TO_CHAR(a.percent_sum))),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
+                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE TO_CHAR(a.amount_month)))
+    )
+  )                                    AS payload
+FROM agg a;

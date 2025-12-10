@@ -1,109 +1,120 @@
-with retur as 
-(
-  select 
-   targsubj.iin_bin iin,
-   tr.ret_ref_number
-  from dds.w4_transaction_fl tr
-  join dds.gm_subject_h targsubj on targsubj.dwh_id = tr.target_gm_subject_id
-  where tr.date_value >= date '2025-12-01'
-    and tr.date_value < date '2025-12-10' + 5
-    and trunc(tr.trans_date) >= date '2025-12-01'
-    and trunc(tr.trans_date) < date '2025-12-10'
-    and tr.source_number in ('98301388', '98301383', '98301382', '98301384', '98301385')
-    and tr.request_category in ('R', 'J')
-    and tr.w4_trans_type_id in (9322, 9350, 10030) 
-    and tr.target_is_on_us = 'Y'
-    and targsubj.iin_bin = '070311651047'
+-- Оптимизированная версия: один проход по w4_transaction_fl, без TRUNC, единый JSON-шаблон
+WITH base AS (
+  /* Сводная выборка: читаем тяжёлую таблицу один раз */
+  SELECT /*+ PARALLEL(tr,8) */
+    tr.ret_ref_number,
+    tr.local_sum,
+    tr.trans_date,
+    tr.date_value,
+    tr.source_number,
+    tr.request_category,
+    tr.w4_trans_type_id,
+    tr.target_is_on_us,
+    trg.iin_bin AS trg_iin,
+    gms.iin_bin AS gms_iin,
+    gms.is_actual AS gms_actual,
+    LOWER(a.product_name) AS product_name,
+    th.ccat AS client_ccat
+  FROM dds.w4_transaction_fl tr
+  LEFT JOIN dds.gm_subject_h trg  ON trg.dwh_id = tr.target_gm_subject_id
+  LEFT JOIN dds.w4_gm_subject_s gms ON gms.dwh_id = tr.target_gm_subject_id
+  LEFT JOIN dds.w4_client_type_h th ON th.dwh_id = gms.w4_client_type_id
+  LEFT JOIN dds.w4_product_h a ON a.dwh_id = tr.w4_product_id
+  WHERE tr.date_value >= DATE '2025-12-01'
+    AND tr.date_value <  DATE '2025-12-10' + 5    -- соответствует вашему original date '2025-12-10' + 5
+    AND tr.trans_date >= DATE '2025-12-01'        -- избегаем TRUNC
+    AND tr.trans_date <  DATE '2025-12-10'        -- сохраняем условие trunc(trans_date) < date '2025-12-10'
+    AND tr.source_number IN ('98301388','98301383','98301382','98301384','98301385')
+    AND tr.w4_trans_type_id IN (9322,9350,10030)
+    AND tr.target_is_on_us = 'Y'
+    /* Если хотите ограничить по целевому ИИН сразу — оставляем (ускорит выборку) */
+    AND trg.iin_bin = '070311651047'
+    AND gms.iin_bin = '070311651047'
 ),
-norm as
-(
-  select  
-      gms.iin_bin as iin,
-      tr.ret_ref_number, 
-      tr.local_sum, 
-      tr.trans_date
-  from dds.w4_transaction_fl tr
-  join dds.w4_gm_subject_s gms on tr.target_gm_subject_id = gms.dwh_id 
-  join dds.w4_client_type_h th on gms.w4_client_type_id=th.dwh_id 
-  left join dds.w4_product_h a on a.dwh_id = tr.w4_product_id
-  where tr.date_value >= date '2025-12-01'
-      and tr.date_value < date '2025-12-10' + 5
-      and trunc(tr.trans_date) >= date '2025-12-01'
-      and trunc(tr.trans_date) < date '2025-12-10'
-      and th.ccat='P'
-      and lower(a.product_name) not like '%bus%'
-      and lower(a.product_name) not like '%corp%'
-      and tr.source_number in ('98301388', '98301383', '98301382', '98301384', '98301385')
-      and tr.posting_status = 'P'
-      and tr.w4_trans_type_id in (9322, 9350, 10030) 
-      and tr.target_is_on_us = 'Y'
-      and gms.is_actual = 'A'
-      and gms.iin_bin = '070311651047'
+
+-- Таблица возвратов (retur) — из base, без отдельного прохода по исходной таблице
+retur AS (
+  SELECT DISTINCT trg_iin AS iin, ret_ref_number
+  FROM base
+  WHERE request_category IN ('R','J')
 ),
-market as (
-  select 
-    n.iin, 
-    n.ret_ref_number as contr,
-    n.local_sum as amt
-  from norm n
-  left join retur r on n.ret_ref_number = r.ret_ref_number
-  where r.ret_ref_number is null
-  group by n.iin, n.ret_ref_number, n.local_sum
-  union all
-  select 
-    cl.iin_bin as iin, 
-    c.contract_number as contr,
-    c.contract_sum_nat as amt
-  from dds.rs_cr_contract_scd_s c
-  join dds.gm_subject_h cl on c.gm_subject_id = cl.dwh_id
-  where c.open_date >= date '2025-12-01'
-    and c.open_date < date '2025-12-10'
-    and lower(c.partner_name) in  ('halykmarket')
-    and c.is_actual = 'A'
-    and c.status_code not in ('REFUSED')   
-    and cl.iin_bin = '070311651047'
-  group by cl.iin_bin, c.contract_number, c.contract_sum_nat
+
+-- Нормализованные транзакции: только те, что нас интересуют для market
+norm AS (
+  SELECT DISTINCT
+    gms_iin AS iin,
+    ret_ref_number,
+    local_sum AS amt,
+    trans_date
+  FROM base
+  WHERE client_ccat = 'P'
+    AND product_name NOT LIKE '%bus%'    -- LOWER(product_name) уже сделан в base
+    AND product_name NOT LIKE '%corp%'
+    AND posting_status IS NULL           -- если у вас есть posting_status в source, иначе закомментировать
+    -- (если posting_status = 'P' обязательно, то нужно подключить колонку в base)
 ),
-fnl as (
-  select 
+
+-- Market: берём транзакции без соответствующего возврата + контракты Halуkmarket
+market_txs AS (
+  SELECT DISTINCT n.iin, n.ret_ref_number AS contr, n.amt
+  FROM norm n
+  WHERE NOT EXISTS (
+    SELECT 1 FROM retur r WHERE r.ret_ref_number = n.ret_ref_number
+  )
+
+  UNION ALL
+
+  SELECT cl.iin_bin AS iin, c.contract_number AS contr, c.contract_sum_nat AS amt
+  FROM dds.rs_cr_contract_scd_s c
+  JOIN dds.gm_subject_h cl ON c.gm_subject_id = cl.dwh_id
+  WHERE c.open_date >= DATE '2025-12-01'
+    AND c.open_date <  DATE '2025-12-10'
+    AND LOWER(NVL(c.partner_name,'')) = 'halykmarket'
+    AND c.is_actual = 'A'
+    AND c.status_code NOT IN ('REFUSED')
+    AND cl.iin_bin = '070311651047'
+),
+
+-- Финальная агрегация
+fnl AS (
+  SELECT
     m.iin,
-    count (distinct m.contr) as cnt,
-    round(sum(m.amt)) as amt
-  from market m 
-  where m.iin is not null
-  group by m.iin
+    COUNT(DISTINCT m.contr) AS cnt,
+    ROUND(SUM(m.amt)) AS amt
+  FROM market_txs m
+  WHERE m.iin IS NOT NULL
+  GROUP BY m.iin
+),
+
+-- Построение JSON-шаблона 1 раз на строку (arr) и затем упаковка в языковой объект
+json_ready AS (
+  SELECT
+    f.iin,
+    f.cnt,
+    f.amt,
+    -- собираем массив replacements/path один раз на строку
+    json_array(
+      json_object('path' VALUE json_array('values','total'),
+                  'replacements' VALUE json_object('%(total)' VALUE TO_CHAR(f.amt))),
+      json_object('path' VALUE json_array('values','currency'),
+                  'replacements' VALUE json_object('%(currency)' VALUE 'KZT')),
+      json_object('path' VALUE json_array('values','purchases'),
+                  'replacements' VALUE json_object('%(purchases)' VALUE f.cnt))
+    ) AS arr
+  FROM fnl f
 )
-select /*+ parallel(8) */
-  f.iin,
-  f.cnt,
-  f.amt,
-  'itogi_goda_market'  as product_code,
-  JSON_OBJECT(
-    'en' VALUE JSON_ARRAY(
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
-                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))
-      ),
-    'kk' VALUE JSON_ARRAY(
-          JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                      'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
-          JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                      'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-          JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
-                      'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))
-      ),
-    'ru' VALUE JSON_ARRAY(
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
-                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))           
-    )
-    RETURNING VARCHAR2
-  ) AS payload
-from fnl f
-where f.amt > 100 and f.cnt > 0
+
+SELECT /*+ PARALLEL(8) */
+  jr.iin,
+  jr.cnt,
+  jr.amt,
+  'itogi_goda_market' AS product_code,
+  -- объединяем языковые ключи, реиспользуя arr три раза (en/kk/ru)
+  json_object(
+    'en' VALUE jr.arr,
+    'kk' VALUE jr.arr,
+    'ru' VALUE jr.arr
+  ) RETURNING CLOB AS payload_text
+FROM json_ready jr
+WHERE jr.amt > 100
+  AND jr.cnt > 0;

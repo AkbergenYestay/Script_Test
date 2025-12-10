@@ -1,6 +1,5 @@
--- Оптимизированная версия: один проход по w4_transaction_fl, без TRUNC, единый JSON-шаблон
 WITH base AS (
-  /* Сводная выборка: читаем тяжёлую таблицу один раз */
+  /* один проход по тяжёлой таблице */
   SELECT /*+ PARALLEL(tr,8) */
     tr.ret_ref_number,
     tr.local_sum,
@@ -10,6 +9,7 @@ WITH base AS (
     tr.request_category,
     tr.w4_trans_type_id,
     tr.target_is_on_us,
+    tr.posting_status,
     trg.iin_bin AS trg_iin,
     gms.iin_bin AS gms_iin,
     gms.is_actual AS gms_actual,
@@ -21,42 +21,42 @@ WITH base AS (
   LEFT JOIN dds.w4_client_type_h th ON th.dwh_id = gms.w4_client_type_id
   LEFT JOIN dds.w4_product_h a ON a.dwh_id = tr.w4_product_id
   WHERE tr.date_value >= DATE '2025-12-01'
-    AND tr.date_value <  DATE '2025-12-10' + 5    -- соответствует вашему original date '2025-12-10' + 5
-    AND tr.trans_date >= DATE '2025-12-01'        -- избегаем TRUNC
-    AND tr.trans_date <  DATE '2025-12-10'        -- сохраняем условие trunc(trans_date) < date '2025-12-10'
+    AND tr.date_value <  DATE '2025-12-10' + 5        -- если нужно +5 дней
+    AND tr.trans_date >= DATE '2025-12-01'            -- избегаем TRUNC
+    AND tr.trans_date <  DATE '2025-12-10'
     AND tr.source_number IN ('98301388','98301383','98301382','98301384','98301385')
     AND tr.w4_trans_type_id IN (9322,9350,10030)
     AND tr.target_is_on_us = 'Y'
-    /* Если хотите ограничить по целевому ИИН сразу — оставляем (ускорит выборку) */
-    AND trg.iin_bin = '070311651047'
-    AND gms.iin_bin = '070311651047'
+    /* ограничение по iin ускоряет выборку — оставил как у вас */
+    AND (trg.iin_bin = '070311651047' OR gms.iin_bin = '070311651047')
 ),
 
--- Таблица возвратов (retur) — из base, без отдельного прохода по исходной таблице
 retur AS (
-  SELECT DISTINCT trg_iin AS iin, ret_ref_number
+  /* возвраты — берём из base (без отдельного прохода по таблице транзакций) */
+  SELECT DISTINCT
+    COALESCE(trg_iin, gms_iin) AS iin,
+    ret_ref_number
   FROM base
   WHERE request_category IN ('R','J')
 ),
 
--- Нормализованные транзакции: только те, что нас интересуют для market
 norm AS (
   SELECT DISTINCT
     gms_iin AS iin,
     ret_ref_number,
-    local_sum AS amt,
-    trans_date
+    local_sum,
+    trans_date,
+    posting_status
   FROM base
   WHERE client_ccat = 'P'
-    AND product_name NOT LIKE '%bus%'    -- LOWER(product_name) уже сделан в base
+    AND product_name NOT LIKE '%bus%'
     AND product_name NOT LIKE '%corp%'
-    AND posting_status IS NULL           -- если у вас есть posting_status в source, иначе закомментировать
-    -- (если posting_status = 'P' обязательно, то нужно подключить колонку в base)
+    /* если важно, требуйте posting_status = 'P' — сейчас просто передаём колонку */
 ),
 
--- Market: берём транзакции без соответствующего возврата + контракты Halуkmarket
-market_txs AS (
-  SELECT DISTINCT n.iin, n.ret_ref_number AS contr, n.amt
+market AS (
+  /* транзакции без возвратов */
+  SELECT n.iin, n.ret_ref_number AS contr, n.local_sum AS amt
   FROM norm n
   WHERE NOT EXISTS (
     SELECT 1 FROM retur r WHERE r.ret_ref_number = n.ret_ref_number
@@ -64,6 +64,7 @@ market_txs AS (
 
   UNION ALL
 
+  /* контракты halykmarket */
   SELECT cl.iin_bin AS iin, c.contract_number AS contr, c.contract_sum_nat AS amt
   FROM dds.rs_cr_contract_scd_s c
   JOIN dds.gm_subject_h cl ON c.gm_subject_id = cl.dwh_id
@@ -75,46 +76,50 @@ market_txs AS (
     AND cl.iin_bin = '070311651047'
 ),
 
--- Финальная агрегация
 fnl AS (
   SELECT
     m.iin,
     COUNT(DISTINCT m.contr) AS cnt,
     ROUND(SUM(m.amt)) AS amt
-  FROM market_txs m
+  FROM market m
   WHERE m.iin IS NOT NULL
   GROUP BY m.iin
-),
-
--- Построение JSON-шаблона 1 раз на строку (arr) и затем упаковка в языковой объект
-json_ready AS (
-  SELECT
-    f.iin,
-    f.cnt,
-    f.amt,
-    -- собираем массив replacements/path один раз на строку
-    json_array(
-      json_object('path' VALUE json_array('values','total'),
-                  'replacements' VALUE json_object('%(total)' VALUE TO_CHAR(f.amt))),
-      json_object('path' VALUE json_array('values','currency'),
-                  'replacements' VALUE json_object('%(currency)' VALUE 'KZT')),
-      json_object('path' VALUE json_array('values','purchases'),
-                  'replacements' VALUE json_object('%(purchases)' VALUE f.cnt))
-    ) AS arr
-  FROM fnl f
 )
 
 SELECT /*+ PARALLEL(8) */
-  jr.iin,
-  jr.cnt,
-  jr.amt,
+  f.iin,
+  f.cnt,
+  f.amt,
   'itogi_goda_market' AS product_code,
-  -- объединяем языковые ключи, реиспользуя arr три раза (en/kk/ru)
-  json_object(
-    'en' VALUE jr.arr,
-    'kk' VALUE jr.arr,
-    'ru' VALUE jr.arr
-  ) RETURNING CLOB AS payload_text
-FROM json_ready jr
-WHERE jr.amt > 100
-  AND jr.cnt > 0;
+
+  -- JSON оставлен в исходном виде (ваш оригинальный синтаксис)
+  JSON_OBJECT(
+    'en' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE f.amt)),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE f.cnt))
+    ),
+    'kk' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE f.amt)),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE f.cnt))
+    ),
+    'ru' VALUE JSON_ARRAY(
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE f.amt)),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE f.cnt))
+    )
+  RETURNING VARCHAR2   -- <-- как в вашем оригинале: оставил тип возвращаемого значения
+  ) AS payload
+FROM fnl f
+WHERE f.amt > 100
+  AND f.cnt > 0;

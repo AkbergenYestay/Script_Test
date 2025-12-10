@@ -1,92 +1,77 @@
-select /*+ parallel(8)*/
+-- Предположим: Oracle
+WITH
+-- 1) Предфильтруем основной набор записей (ha + pd + нужные join-ы)
+filtered AS (
+  SELECT
+    ha.iin_bin AS iin,
+    trunc(ha.exec_date,'MM') AS mnth,
+    ha.amount_sum_nat AS percent_sum
+  FROM dds.rs_ds_anl_halfentry_fl ha
+  JOIN dds.rs_pd_payment_fl     pd
+    ON ha.rs_ds_oper_source_id = pd.parent_processid
+   AND ha.rs_ds_oper_njrn      = pd.parent_process_njrn
+  LEFT JOIN dds.gm_subject_h    g
+    ON g.dwh_id = ha.gm_subject_id
+   AND g.gm_system_code = 'RS'
+  JOIN dds.rs_ds_contract_scd_s ds
+    ON ha.rs_ds_contract_id = ds.dwh_id
+   AND ds.is_actual = 'A'
+  JOIN dds.rs_gm_product_h pr
+    ON ds.rs_gm_product_id = pr.dwh_id
+  WHERE
+    ha.date_value >= DATE '$$D_BEGIN'
+    AND ha.date_value <  DATE '$$D_END'
+    AND pd.date_value >= DATE '$$D_BEGIN'
+    AND pd.date_value <  DATE '$$D_END'
+    AND ha.incom_fl = 0
+    AND ha.nord = 1
+    -- если фильтр по тексту важен — лучше заменить lower(assign) like '%выплата%'
+    -- на использование индексируемой колонки или на полнотекстный / function-based индекс:
+    AND lower(assign) LIKE '%выплата%'
+    AND (ds.close_date = ds.end_date OR ds.close_date IS NULL)
+),
+-- 2) Сначала агрегируем по iin + month (уменьшаем строки для DISTINCT month)
+per_iin_month AS (
+  SELECT
+    iin,
+    mnth,
+    SUM(percent_sum) AS sum_month -- сумма процентов в месяце (может быть 0)
+  FROM filtered
+  GROUP BY iin, mnth
+)
+-- 3) Итоговая агрегация по iin
+SELECT /*+ parallel(8) */
    iin,
-   percent_sum,
-   cnt_mnth,
-   amount_month,
-   'depo_itog_proc' as product_code,
-   trunc(sysdate) as upload_date,
+   ROUND(SUM(sum_month))                                  AS percent_sum,
+   COUNT(*)                                               AS cnt_mnth,
+   ROUND(SUM(sum_month) / NULLIF(COUNT(*),0))             AS amount_month,
+   'depo_itog_proc'                                       AS product_code,
+   TRUNC(SYSDATE)                                         AS upload_date,
    JSON_OBJECT(
       'en' VALUE JSON_ARRAY(
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
+                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE ROUND(SUM(sum_month)))),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
                     'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
+                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE ROUND(SUM(sum_month)/NULLIF(COUNT(*),0))))
       ),
       'kk' VALUE JSON_ARRAY(
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
+                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE ROUND(SUM(sum_month)))),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
                     'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
+                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE ROUND(SUM(sum_month)/NULLIF(COUNT(*),0))))
       ),
       'ru' VALUE JSON_ARRAY(
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
+                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE ROUND(SUM(sum_month)))),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
                     'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
         JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
+                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE ROUND(SUM(sum_month)/NULLIF(COUNT(*),0))))
       )
-   )    as payload
-from (select 
-       iin,
-           count(distinct mnth) cnt_mnth,
-           round(sum(percent_sum)) percent_sum,
-           round(sum(percent_sum) / count(distinct mnth)) amount_month
-      from (select iin_bin iin,
-                   trunc(ha.exec_date, 'mm') mnth,
-                   AMOUNT_SUM_NAT percent_sum
-              from dds.RS_DS_ANL_HALFENTRY_FL ha
-             inner join dds.RS_PD_PAYMENT_FL pd
-                on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
-               and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-              left join dds.gm_subject_h g
-                on g.dwh_id = ha.gm_subject_id
-               and g.gm_system_code = 'RS'
-             inner join dds.rs_ds_contract_scd_s ds
-                on ha.rs_ds_contract_id = ds.dwh_id
-               and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-             inner join dds.rs_gm_product_h pr
-                on ds.rs_gm_product_id = pr.dwh_id
-               and pr.dwh_code in ('15735', '15900')
-             where 1 = 1
-               and ha.DATE_VALUE >= date '$$D_BEGIN'
-               and ha.DATE_VALUE < date '$$D_END' -- date '2025-09-01'
-               and pd.DATE_VALUE >= date '$$D_BEGIN'
-               and pd.DATE_VALUE < date '$$D_END' -- date '2025-09-01'
-               and ha.INCOM_FL = 0
-               and ha.NORD = 1
-               and lower(assign) like '%выплата%'
-               and (ds.close_date = ds.end_date or ds.close_date is null)
-               --and iin_bin = '830115401994'
-            union all
-            select iin_bin iin,
-                   trunc(ha.exec_date, 'mm') mnth,
-                   AMOUNT_SUM_NAT percent_sum
-              from dds.RS_DS_ANL_HALFENTRY_FL ha
-             inner join dds.RS_PD_PAYMENT_FL pd
-                on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
-               and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-              left join dds.gm_subject_h g
-                on g.dwh_id = ha.gm_subject_id
-               and g.gm_system_code = 'RS'
-             inner join dds.rs_ds_contract_scd_s ds
-                on ha.rs_ds_contract_id = ds.dwh_id
-               and is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-             inner join dds.rs_gm_product_h pr
-                on ds.rs_gm_product_id = pr.dwh_id
-               and pr.dwh_code not in ('15735', '15900')
-             where 1 = 1
-               and ha.DATE_VALUE >= date '$$D_BEGIN'
-               and ha.DATE_VALUE < date '$$D_END' -- date '2025-09-01'
-               and pd.DATE_VALUE >= date '$$D_BEGIN'
-               and pd.DATE_VALUE < date '$$D_END' -- date '2025-09-01'
-               and ha.INCOM_FL = 0
-               and ha.NORD = 1
-               and lower(assign) like '%выплата%'
-               --and iin_bin = '830115401994'
-      )
-group by iin)
+   ) AS payload
+FROM per_iin_month
+GROUP BY iin;

@@ -1,74 +1,109 @@
-WITH params AS (
-  SELECT DATE '2025-01-01' AS start_dt,
-         TRUNC(SYSDATE, 'MM') AS end_dt
-  FROM dual
+with retur as 
+(
+  select 
+   targsubj.iin_bin iin,
+   tr.ret_ref_number
+  from dds.w4_transaction_fl tr
+  join dds.gm_subject_h targsubj on targsubj.dwh_id = tr.target_gm_subject_id
+  where tr.date_value >= date '2025-12-01'
+    and tr.date_value < date '2025-12-10' + 5
+    and trunc(tr.trans_date) >= date '2025-12-01'
+    and trunc(tr.trans_date) < date '2025-12-10'
+    and tr.source_number in ('98301388', '98301383', '98301382', '98301384', '98301385')
+    and tr.request_category in ('R', 'J')
+    and tr.w4_trans_type_id in (9322, 9350, 10030) 
+    and tr.target_is_on_us = 'Y'
+    and targsubj.iin_bin = '070311651047'
 ),
-raw AS (
-  SELECT
-    ha.iin_bin                       AS iin,
-    TRUNC(ha.exec_date, 'MM')        AS mnth,
-    ha.amount_sum_nat                AS amt
-  FROM dds.RS_DS_ANL_HALFENTRY_FL ha
-  JOIN dds.RS_PD_PAYMENT_FL pd
-    ON ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
-   AND ha.RS_DS_OPER_NJRN       = pd.PARENT_PROCESS_NJRN
-  LEFT JOIN dds.GM_SUBJECT_H g
-    ON g.DWH_ID = ha.GM_SUBJECT_ID
-   AND g.GM_SYSTEM_CODE = 'RS'
-  JOIN dds.RS_DS_CONTRACT_SCD_S ds
-    ON ha.RS_DS_CONTRACT_ID = ds.DWH_ID
-   AND ds.IS_ACTUAL = 'A'
-  JOIN dds.RS_GM_PRODUCT_H pr
-    ON ds.RS_GM_PRODUCT_ID = pr.DWH_ID
-  WHERE ha.DATE_VALUE >= (SELECT start_dt FROM params)
-    AND ha.DATE_VALUE <  (SELECT end_dt FROM params)
-    AND pd.DATE_VALUE >= (SELECT start_dt FROM params)
-    AND pd.DATE_VALUE <  (SELECT end_dt FROM params)
-    AND ha.INCOM_FL = 0
-    AND ha.NORD = 1
-    AND LOWER(ha.ASSIGN) LIKE '%выплата%'
-    AND (ds.CLOSE_DATE = ds.END_DATE OR ds.CLOSE_DATE IS NULL)
+norm as
+(
+  select  
+      gms.iin_bin as iin,
+      tr.ret_ref_number, 
+      tr.local_sum, 
+      tr.trans_date
+  from dds.w4_transaction_fl tr
+  join dds.w4_gm_subject_s gms on tr.target_gm_subject_id = gms.dwh_id 
+  join dds.w4_client_type_h th on gms.w4_client_type_id=th.dwh_id 
+  left join dds.w4_product_h a on a.dwh_id = tr.w4_product_id
+  where tr.date_value >= date '2025-12-01'
+      and tr.date_value < date '2025-12-10' + 5
+      and trunc(tr.trans_date) >= date '2025-12-01'
+      and trunc(tr.trans_date) < date '2025-12-10'
+      and th.ccat='P'
+      and lower(a.product_name) not like '%bus%'
+      and lower(a.product_name) not like '%corp%'
+      and tr.source_number in ('98301388', '98301383', '98301382', '98301384', '98301385')
+      and tr.posting_status = 'P'
+      and tr.w4_trans_type_id in (9322, 9350, 10030) 
+      and tr.target_is_on_us = 'Y'
+      and gms.is_actual = 'A'
+      and gms.iin_bin = '070311651047'
 ),
-agg AS (
-  SELECT
-    iin,
-    COUNT(DISTINCT mnth)                     AS cnt_mnth,
-    ROUND(SUM(amt))                          AS percent_sum,
-    ROUND(SUM(amt) / NULLIF(COUNT(DISTINCT mnth), 0)) AS amount_month
-  FROM raw
-  GROUP BY iin
+market as (
+  select 
+    n.iin, 
+    n.ret_ref_number as contr,
+    n.local_sum as amt
+  from norm n
+  left join retur r on n.ret_ref_number = r.ret_ref_number
+  where r.ret_ref_number is null
+  group by n.iin, n.ret_ref_number, n.local_sum
+  union all
+  select 
+    cl.iin_bin as iin, 
+    c.contract_number as contr,
+    c.contract_sum_nat as amt
+  from dds.rs_cr_contract_scd_s c
+  join dds.gm_subject_h cl on c.gm_subject_id = cl.dwh_id
+  where c.open_date >= date '2025-12-01'
+    and c.open_date < date '2025-12-10'
+    and lower(c.partner_name) in  ('halykmarket')
+    and c.is_actual = 'A'
+    and c.status_code not in ('REFUSED')   
+    and cl.iin_bin = '070311651047'
+  group by cl.iin_bin, c.contract_number, c.contract_sum_nat
+),
+fnl as (
+  select 
+    m.iin,
+    count (distinct m.contr) as cnt,
+    round(sum(m.amt)) as amt
+  from market m 
+  where m.iin is not null
+  group by m.iin
 )
-SELECT /*+ parallel(8) */
-  a.iin,
-  a.percent_sum,
-  a.cnt_mnth,
-  a.amount_month,
-  'depo_itog_proc' AS product_code,
-  TRUNC(SYSDATE)     AS upload_date,
+select /*+ parallel(8) */
+  f.iin,
+  f.cnt,
+  f.amt,
+  'itogi_goda_market'  as product_code,
   JSON_OBJECT(
     'en' VALUE JSON_ARRAY(
       JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE a.percent_sum)),
+                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
       JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
                   'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE a.amount_month))
-    ),
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))
+      ),
     'kk' VALUE JSON_ARRAY(
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE a.percent_sum)),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                  'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE a.amount_month))
-    ),
+          JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
+                      'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
+          JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
+                      'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
+          JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                      'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))
+      ),
     'ru' VALUE JSON_ARRAY(
       JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                  'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE a.percent_sum)),
+                  'replacements' VALUE JSON_OBJECT('%(total)' VALUE amt)),
       JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
                   'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-      JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                  'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE a.amount_month))
+      JSON_OBJECT('path' VALUE JSON_ARRAY('values','purchases'),
+                  'replacements' VALUE JSON_OBJECT('%(purchases)' VALUE cnt))           
     )
+    RETURNING VARCHAR2
   ) AS payload
-FROM agg a;
+from fnl f
+where f.amt > 100 and f.cnt > 0

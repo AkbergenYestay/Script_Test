@@ -2,35 +2,7 @@ select /*+ parallel(8)*/
    iin,
    percent_sum,
    cnt_mnth,
-   amount_month,
-   'depo_itog_proc' as product_code,
-   trunc(sysdate) as upload_date,
-   JSON_OBJECT(
-      'en' VALUE JSON_ARRAY(
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                    'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
-      ),
-      'kk' VALUE JSON_ARRAY(
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                    'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
-      ),
-      'ru' VALUE JSON_ARRAY(
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','total'),
-                    'replacements' VALUE JSON_OBJECT('%(amountTotal)' VALUE to_number(percent_sum))),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','currency'),
-                    'replacements' VALUE JSON_OBJECT('%(currency)' VALUE 'KZT')),
-        JSON_OBJECT('path' VALUE JSON_ARRAY('values','month'),
-                    'replacements' VALUE JSON_OBJECT('%(amountMonth)' VALUE to_number(amount_month)))
-      )
-   )    as payload
+   amount_month
 from 
   (select 
        iin,

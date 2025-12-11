@@ -1,75 +1,34 @@
-select /*+ parallel(8)*/
-   iin,
-   percent_sum,
-   cnt_mnth,
-   amount_month
-from 
-  (select 
-       iin,
-       count(distinct mnth) cnt_mnth,
-       round(sum(percent_sum)) percent_sum,
-       round(sum(percent_sum) / count(distinct mnth)) amount_month
-     from (select 
-               g.iin_bin iin,
-               trunc(ha.exec_date, 'mm') mnth,
-               AMOUNT_SUM_NAT percent_sum
-          from dds.RS_DS_ANL_HALFENTRY_FL ha
-         inner join dds.RS_PD_PAYMENT_FL pd
-            on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
-           and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-          left join dds.gm_subject_h g
-            on g.dwh_id = ha.gm_subject_id
-           and g.gm_system_code = 'RS'
-          /*join dds.ocrm_rb_subject_s s on g.iin_bin  = s.iin_bin
-           and s.is_actual='A' and s.dead_fl <> '1' and length(s.iin_bin) = 12
-           and s.date_end = to_date('9999-12-31', 'yyyy-mm-dd')
-           and s.birth_date is not null and floor((trunc(sysdate) - s.birth_date) / 365) >= 18*/
-         inner join dds.rs_ds_contract_scd_s ds
-            on ha.rs_ds_contract_id = ds.dwh_id
-           and ds.is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-         inner join dds.rs_gm_product_h pr
-            on ds.rs_gm_product_id = pr.dwh_id
-           and pr.dwh_code in ('15735', '15900')
-         where 1 = 1
-           and ha.DATE_VALUE >= date '2025-12-01'
-           and ha.DATE_VALUE < date '2025-12-10' -- date '2025-09-01'
-           and pd.DATE_VALUE >= date '2025-12-01'
-           and pd.DATE_VALUE < date '2025-12-10' -- date '2025-09-01'
-           and ha.INCOM_FL = 0
-           and ha.NORD = 1
-           and lower(assign) like '%выплата%'
-           and (ds.close_date = ds.end_date or ds.close_date is null)
-           --and g.iin_bin = '830115401994'
-        union all
-        select g.iin_bin iin,
-               trunc(ha.exec_date, 'mm') mnth,
-               AMOUNT_SUM_NAT percent_sum
-          from dds.RS_DS_ANL_HALFENTRY_FL ha
-         inner join dds.RS_PD_PAYMENT_FL pd
-            on ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
-           and ha.RS_DS_OPER_NJRN = pd.PARENT_PROCESS_NJRN
-          left join dds.gm_subject_h g
-            on g.dwh_id = ha.gm_subject_id
-           and g.gm_system_code = 'RS'
-          /*join dds.ocrm_rb_subject_s s on g.iin_bin  = s.iin_bin
-           and s.is_actual='A' and s.dead_fl <> '1' and length(s.iin_bin) = 12
-           and s.date_end = to_date('9999-12-31', 'yyyy-mm-dd')
-           and s.birth_date is not null and floor((trunc(sysdate) - s.birth_date) / 365) >= 18*/ 
-         inner join dds.rs_ds_contract_scd_s ds
-            on ha.rs_ds_contract_id = ds.dwh_id
-           and ds.is_actual = 'A' --and ha.date_value between ds.open_date and ds.end_date
-         inner join dds.rs_gm_product_h pr
-            on ds.rs_gm_product_id = pr.dwh_id
-           and pr.dwh_code not in ('15735', '15900')
-         where 1 = 1
-           and ha.DATE_VALUE >= date '2025-12-01'
-           and ha.DATE_VALUE < date '2025-12-10' -- date '2025-09-01'
-           and pd.DATE_VALUE >= date '2025-12-01'
-           and pd.DATE_VALUE < date '2025-12-10' -- date '2025-09-01'
-           and ha.INCOM_FL = 0
-           and ha.NORD = 1
-           and lower(assign) like '%выплата%'
-           --and g.iin_bin = '830115401994'
-     )
-  group by iin
-)
+SELECT /*+ PARALLEL(8) */
+       m.iin,
+       ROUND(SUM(m.month_amount))                    AS percent_sum,
+       COUNT(*)                                      AS cnt_mnth,
+       ROUND(SUM(m.month_amount) / NULLIF(COUNT(*),0)) AS amount_month
+FROM (
+    -- Сгруппировать по iin + месяцу: даёт одну строку на iin+month
+    SELECT
+        NVL(g.iin_bin, 'UNKNOWN') AS iin,
+        TRUNC(ha.exec_date, 'MM')  AS mnth,
+        SUM(ha.amount_sum_nat)     AS month_amount
+    FROM dds.RS_DS_ANL_HALFENTRY_FL    ha
+    JOIN dds.RS_PD_PAYMENT_FL         pd
+      ON ha.RS_DS_OPER_SOURCE_ID = pd.PARENT_PROCESSID
+     AND ha.RS_DS_OPER_NJRN       = pd.PARENT_PROCESS_NJRN
+    LEFT JOIN dds.gm_subject_h       g
+      ON g.dwh_id = ha.gm_subject_id
+     AND g.gm_system_code = 'RS'
+    JOIN dds.rs_ds_contract_scd_s    ds
+      ON ha.rs_ds_contract_id = ds.dwh_id
+     AND ds.is_actual = 'A'
+    JOIN dds.rs_gm_product_h        pr
+      ON ds.rs_gm_product_id = pr.dwh_id
+    WHERE ha.DATE_VALUE >= DATE '2025-12-01'
+      AND ha.DATE_VALUE <  DATE '2025-12-10'
+      AND pd.DATE_VALUE >= DATE '2025-12-01'
+      AND pd.DATE_VALUE <  DATE '2025-12-10'
+      AND ha.INCOM_FL = 0
+      AND ha.NORD    = 1
+      AND LOWER(ha.ASSIGN) LIKE '%выплата%'
+      AND (ds.close_date = ds.end_date OR ds.close_date IS NULL)
+    GROUP BY NVL(g.iin_bin,'UNKNOWN'), TRUNC(ha.exec_date,'MM')
+) m
+GROUP BY m.iin;

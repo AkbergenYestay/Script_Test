@@ -1,6 +1,5 @@
--- YYYY-MM-DD следующего вторника:
 VAR dt DATE;
-EXEC :dt := DATE '2026-01-13';   -- пример, замени на нужную дату
+EXEC :dt := DATE '2026-01-06';
 
 WITH bounds AS (
   SELECT :dt AS tue_start,
@@ -8,51 +7,51 @@ WITH bounds AS (
   FROM dual
 ),
 need AS (
-  SELECT 'wf_w4_pfm_top1mcg' wf, 's_m_w4_pfm_top1mcg' tsk FROM dual UNION ALL
-  SELECT 'wf_w4_pfm_top3_transactions', 's_m_w4_pfm_top3_transactions' FROM dual UNION ALL
-  SELECT 'wf_w4_pfm_top3_merchants', 's_m_w4_pfm_top3_merchants' FROM dual UNION ALL
-  SELECT 'wf_w4_pfm_treat_yourself', 's_m_w4_pfm_treat_yourself' FROM dual
+  SELECT 'wf_w4_pfm_top1mcg' wf, 'pfm_top1mcg1' tsk FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_top3_transactions', 'pfm_top3_transactions1' FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_top3_merchants', 'pfm_top3_merchants1' FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_treat_yourself', 'pfm_treat_yourself1' FROM dual
 ),
 last_run AS (
-  SELECT r.workflow_id, r.workflow_name, r.workflow_run_id,
-         r.start_time wf_start_time, r.end_time wf_end_time, r.run_err_code wf_run_err_code,
-         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+  SELECT
+    r.workflow_id,
+    r.workflow_name,
+    r.workflow_run_id,
+    r.start_time,
+    r.end_time AS wf_end_time,
+    r.run_err_code,
+    ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
   FROM RB_REP.OPB_WFLOW_RUN r
   CROSS JOIN bounds b
   WHERE r.workflow_name IN (SELECT wf FROM need)
     AND r.start_time >= b.tue_start
     AND r.start_time <  b.wed_start
+),
+joined AS (
+  SELECT
+    n.wf,
+    n.tsk,
+    lr.workflow_run_id,
+    lr.wf_end_time,
+    lg.end_time AS task_end_time,
+    lg.last_err_code
+  FROM need n
+  LEFT JOIN last_run lr
+    ON lr.workflow_name = n.wf AND lr.rn = 1
+  LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
+    ON lg.workflow_id = lr.workflow_id
+   AND lg.workflow_run_id = lr.workflow_run_id
+   AND lg.instance_name = n.tsk
 )
 SELECT
-  n.wf AS workflow_name,
-  lr.workflow_run_id,
-  lr.wf_start_time,
-  lr.wf_end_time,
-  lr.wf_run_err_code,
   CASE
-    WHEN lr.workflow_run_id IS NULL THEN 'NO RUN'
-    WHEN lr.wf_end_time IS NULL THEN 'WF RUNNING'
-    WHEN NVL(lr.wf_run_err_code,0) <> 0 THEN 'WF ERROR/WARNING'
-    ELSE 'WF SUCCESS'
-  END AS wf_status,
-
-  n.tsk AS expected_task,
-  lg.instance_name AS found_task,
-  lg.start_time AS task_start_time,
-  lg.end_time   AS task_end_time,
-  lg.last_err_code AS task_last_err_code,
-  CASE
-    WHEN lr.workflow_run_id IS NULL THEN 'NO RUN'
-    WHEN lg.instance_name IS NULL THEN 'TASK NOT FOUND'
-    WHEN lg.end_time IS NULL THEN 'TASK RUNNING'
-    WHEN NVL(lg.last_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
-    ELSE 'TASK SUCCESS'
-  END AS task_status
-FROM need n
-LEFT JOIN last_run lr
-  ON lr.workflow_name = n.wf AND lr.rn = 1
-LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
-  ON lg.workflow_id = lr.workflow_id
- AND lg.workflow_run_id = lr.workflow_run_id
- AND lg.instance_name = n.tsk
-ORDER BY workflow_name;
+    WHEN COUNT(*) = 4
+     AND SUM(CASE WHEN workflow_run_id IS NOT NULL THEN 1 ELSE 0 END) = 4
+     AND SUM(CASE WHEN wf_end_time IS NOT NULL THEN 1 ELSE 0 END) = 4
+     AND SUM(CASE WHEN task_end_time IS NOT NULL THEN 1 ELSE 0 END) = 4
+    THEN 1 ELSE 0
+  END AS all_done,
+  SUM(CASE WHEN workflow_run_id IS NULL THEN 1 ELSE 0 END) AS missing_run,
+  SUM(CASE WHEN wf_end_time IS NULL THEN 1 ELSE 0 END) AS wf_not_finished,
+  SUM(CASE WHEN task_end_time IS NULL THEN 1 ELSE 0 END) AS task_not_finished
+FROM joined;

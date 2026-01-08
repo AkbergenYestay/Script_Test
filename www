@@ -89,7 +89,7 @@ def check_and_alert(**context):
                         R3.RUN_ERR_CODE,
                         R2.LAST_ERR_CODE,
                         R2.LAST_ERR_MSG)
-            WHERE WORKFLOW_NAME in ('wf_w4_pfm_top1mcg', 'wf_w4_pfm_top3_transactions', 'wf_w4_pfm_top3_merchants')
+            WHERE WORKFLOW_NAME in ('wf_w4_pfm_top1mcg', 'wf_w4_pfm_top3_transactions', 'wf_w4_pfm_top3_merchants', 'wf_w4_pfm_treat_yourself')
             AND rn = 1
 
     """
@@ -105,7 +105,7 @@ def check_and_alert(**context):
 with DAG(
     dag_id="pfm_start_every_tuesday",
     default_args=default_args,
-    schedule="0 14 * * 4",
+    schedule="0 14 * * 2",
     catchup=False,
     tags=["pfm"],
 ) as dag:

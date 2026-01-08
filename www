@@ -47,9 +47,7 @@ def _oracle_fetch(sql: str, params: Dict) -> List[Tuple]:
 
 
 def _bounds_for_day(context) -> Tuple[datetime, datetime]:
-    """
-    Окно дня запуска DAG: 00:00..00:00 следующего дня по TZ.
-    """
+    """Окно дня запуска DAG: 00:00..00:00 следующего дня по TZ."""
     ld = context["logical_date"].in_timezone(TZ)
     day_start = ld.start_of("day").naive()
     next_day_start = ld.add(days=1).start_of("day").naive()
@@ -153,6 +151,9 @@ def _task_status(wf_run_id, task_start, task_end, task_err, found_task: bool) ->
     return "UNKNOWN"
 
 
+# =========================
+# Sensor / notifier
+# =========================
 def all_finished(**context) -> bool:
     day_start, next_day_start = _bounds_for_day(context)
     rows = fetch_status_rows(day_start, next_day_start)
@@ -160,7 +161,7 @@ def all_finished(**context) -> bool:
     # Готово, когда для каждого WF:
     # - есть workflow_run_id
     # - wf_end_time not null
-    # - task_end_time not null (task должен существовать и завершиться)
+    # - task_end_time not null
     for (
         wf,
         tsk,
@@ -234,9 +235,9 @@ def send_telegram(**context):
 
 
 with DAG(
-    dag_id="prod_edw_to_operations_notify_after_all_done_every_tuesday",
+    dag_id="prod_edw_to_operations_notify_after_all_done_daily_0800",
     default_args=default_args,
-    schedule="5 8 * * 2",  # каждый вторник в 08:05
+    schedule="0 8 * * *",  # каждый день в 08:00
     catchup=False,
     tags=["operations", "informatica", "telegram"],
 ) as dag:

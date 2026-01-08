@@ -1,1 +1,52 @@
-
+WITH last_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.end_time AS wf_end_time,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) AS rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE r.workflow_name IN (
+        'wf_w4_pfm_top1mcg',
+        'wf_w4_pfm_top3_transactions',
+        'wf_w4_pfm_top3_merchants',
+        'wf_w4_pfm_treat_yourself'
+    )
+      AND r.start_time >= TRUNC(SYSDATE)
+),
+need AS (
+    SELECT 'wf_w4_pfm_top1mcg' wf, 's_m_w4_pfm_top1mcg' tsk FROM dual UNION ALL
+    SELECT 'wf_w4_pfm_top3_transactions', 's_m_w4_pfm_top3_transactions' FROM dual UNION ALL
+    SELECT 'wf_w4_pfm_top3_merchants', 's_m_w4_pfm_top3_merchants' FROM dual UNION ALL
+    SELECT 'wf_w4_pfm_treat_yourself', 's_m_w4_pfm_treat_yourself' FROM dual
+),
+joined AS (
+    SELECT
+        n.wf,
+        n.tsk,
+        lr.workflow_id,
+        lr.workflow_run_id,
+        lr.wf_end_time,
+        lg.end_time AS task_end_time
+    FROM need n
+    LEFT JOIN last_run lr
+           ON lr.workflow_name = n.wf
+          AND lr.rn = 1
+    LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
+           ON lg.workflow_id = lr.workflow_id
+          AND lg.workflow_run_id = lr.workflow_run_id
+          AND lg.instance_name = n.tsk
+)
+SELECT
+    CASE
+        WHEN COUNT(*) = 4
+         AND SUM(CASE WHEN workflow_run_id IS NOT NULL THEN 1 ELSE 0 END) = 4
+         AND SUM(CASE WHEN wf_end_time   IS NOT NULL THEN 1 ELSE 0 END) = 4
+         AND SUM(CASE WHEN task_end_time IS NOT NULL THEN 1 ELSE 0 END) = 4
+        THEN 1 ELSE 0
+    END AS all_done,
+    -- чтобы видно было, кто не готов
+    SUM(CASE WHEN workflow_run_id IS NULL THEN 1 ELSE 0 END) AS missing_run,
+    SUM(CASE WHEN wf_end_time IS NULL THEN 1 ELSE 0 END) AS wf_not_finished,
+    SUM(CASE WHEN task_end_time IS NULL THEN 1 ELSE 0 END) AS task_not_finished
+FROM joined;

@@ -1,55 +1,9 @@
-WITH last_run AS (
-    SELECT
-        r.workflow_id,
-        r.workflow_name,
-        r.workflow_run_id,
-        r.start_time  AS wf_start_time,
-        r.end_time    AS wf_end_time,
-        r.run_err_code AS wf_run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) AS rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE r.workflow_name IN (
-        'wf_w4_pfm_top1mcg',
-        'wf_w4_pfm_top3_transactions',
-        'wf_w4_pfm_top3_merchants',
-        'wf_w4_pfm_treat_yourself'
-    )
-      AND r.start_time >= TRUNC(SYSDATE)   -- "сегодня" (вторник)
-)
 SELECT
-    lr.workflow_name,
-    lr.workflow_run_id,
-    lr.wf_start_time,
-    lr.wf_end_time,
-    lr.wf_run_err_code,
-    CASE
-        WHEN lr.wf_start_time IS NULL THEN 'NOT STARTED'
-        WHEN lr.wf_end_time   IS NULL THEN 'RUNNING'
-        WHEN NVL(lr.wf_run_err_code, 0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS wf_status,
-
-    lg.instance_name AS task_name,
-    lg.start_time    AS task_start_time,
-    lg.end_time      AS task_end_time,
-    lg.last_err_code AS task_last_err_code,
-    NVL(lg.affected_rows,0) AS affected_rows,
-    CASE
-        WHEN lg.instance_name IS NULL THEN 'NOT FOUND'
-        WHEN lg.start_time    IS NULL THEN 'NOT STARTED'
-        WHEN lg.end_time      IS NULL THEN 'RUNNING'
-        WHEN NVL(lg.last_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS task_status
-FROM last_run lr
-LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
-       ON lg.workflow_id = lr.workflow_id
-      AND lg.workflow_run_id = lr.workflow_run_id
-      AND (
-            (lr.workflow_name = 'wf_w4_pfm_top1mcg'          AND lg.instance_name = 's_m_w4_pfm_top1mcg')
-         OR (lr.workflow_name = 'wf_w4_pfm_top3_transactions' AND lg.instance_name = 's_m_w4_pfm_top3_transactions')
-         OR (lr.workflow_name = 'wf_w4_pfm_top3_merchants'    AND lg.instance_name = 's_m_w4_pfm_top3_merchants')
-         OR (lr.workflow_name = 'wf_w4_pfm_treat_yourself'    AND lg.instance_name = 's_m_w4_pfm_treat_yourself')
-      )
-WHERE lr.rn = 1
-ORDER BY lr.workflow_name;
+  lg.instance_name,
+  MIN(lg.start_time) AS start_time,
+  MAX(lg.end_time)   AS end_time,
+  MAX(lg.last_err_code) AS last_err_code
+FROM RB_REP.OPB_SWIDGINST_LOG lg
+WHERE lg.workflow_run_id = 692286
+GROUP BY lg.instance_name
+ORDER BY 1;

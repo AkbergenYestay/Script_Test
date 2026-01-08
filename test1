@@ -1,9 +1,0 @@
-SELECT
-  lg.instance_name,
-  MIN(lg.start_time) AS start_time,
-  MAX(lg.end_time)   AS end_time,
-  MAX(lg.last_err_code) AS last_err_code
-FROM RB_REP.OPB_SWIDGINST_LOG lg
-WHERE lg.workflow_run_id = 692286
-GROUP BY lg.instance_name
-ORDER BY 1;

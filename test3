@@ -1,1 +1,27 @@
+-- поменяй имя workflow при необходимости
+VAR wf_name VARCHAR2(100);
+EXEC :wf_name := 'wf_w4_pfm_top1mcg';
 
+WITH last_run AS (
+    SELECT r.*
+    FROM (
+        SELECT r.*,
+               ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+        FROM RB_REP.OPB_WFLOW_RUN r
+        WHERE r.workflow_name = :wf_name
+          AND r.start_time >= TRUNC(SYSDATE)
+    ) r
+    WHERE r.rn = 1
+)
+SELECT
+    lg.instance_name,
+    lg.start_time,
+    lg.end_time,
+    lg.last_err_code,
+    lg.last_err_msg,
+    lg.affected_rows
+FROM last_run lr
+JOIN RB_REP.OPB_SWIDGINST_LOG lg
+  ON lg.workflow_id = lr.workflow_id
+ AND lg.workflow_run_id = lr.workflow_run_id
+ORDER BY lg.start_time DESC;

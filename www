@@ -1,261 +1,58 @@
-from __future__ import annotations
+-- YYYY-MM-DD следующего вторника:
+VAR dt DATE;
+EXEC :dt := DATE '2026-01-13';   -- пример, замени на нужную дату
 
-from datetime import datetime, timedelta
-from typing import List, Tuple, Dict
+WITH bounds AS (
+  SELECT :dt AS tue_start,
+         :dt + 1 AS wed_start
+  FROM dual
+),
+need AS (
+  SELECT 'wf_w4_pfm_top1mcg' wf, 's_m_w4_pfm_top1mcg' tsk FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_top3_transactions', 's_m_w4_pfm_top3_transactions' FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_top3_merchants', 's_m_w4_pfm_top3_merchants' FROM dual UNION ALL
+  SELECT 'wf_w4_pfm_treat_yourself', 's_m_w4_pfm_treat_yourself' FROM dual
+),
+last_run AS (
+  SELECT r.workflow_id, r.workflow_name, r.workflow_run_id,
+         r.start_time wf_start_time, r.end_time wf_end_time, r.run_err_code wf_run_err_code,
+         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+  FROM RB_REP.OPB_WFLOW_RUN r
+  CROSS JOIN bounds b
+  WHERE r.workflow_name IN (SELECT wf FROM need)
+    AND r.start_time >= b.tue_start
+    AND r.start_time <  b.wed_start
+)
+SELECT
+  n.wf AS workflow_name,
+  lr.workflow_run_id,
+  lr.wf_start_time,
+  lr.wf_end_time,
+  lr.wf_run_err_code,
+  CASE
+    WHEN lr.workflow_run_id IS NULL THEN 'NO RUN'
+    WHEN lr.wf_end_time IS NULL THEN 'WF RUNNING'
+    WHEN NVL(lr.wf_run_err_code,0) <> 0 THEN 'WF ERROR/WARNING'
+    ELSE 'WF SUCCESS'
+  END AS wf_status,
 
-import pendulum
-
-from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
-from airflow.providers.oracle.hooks.oracle import OracleHook
-
-from source.telegram_notifier import TelegramNotifier
-
-
-TZ = "Asia/Almaty"
-ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
-
-# Маппинг: workflow -> task (instance_name в OPB_SWIDGINST_LOG)
-WF_TASKS = {
-    "wf_w4_pfm_top1mcg": "s_m_w4_pfm_top1mcg",
-    "wf_w4_pfm_top3_transactions": "s_m_w4_pfm_top3_transactions",
-    "wf_w4_pfm_top3_merchants": "s_m_w4_pfm_top3_merchants",
-    "wf_w4_pfm_treat_yourself": "s_m_w4_pfm_treat_yourself",
-}
-
-default_args = {
-    "depends_on_past": False,
-    "start_date": pendulum.datetime(2025, 12, 23, tz=TZ),
-    "retries": 1,
-    "retry_delay": timedelta(minutes=15),
-    "owner": "Yestay",
-}
-
-
-def _oracle_fetch(sql: str, params: Dict) -> List[Tuple]:
-    hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
-    conn = hook.get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, params)
-            return cur.fetchall()
-    finally:
-        conn.close()
-
-
-def _bind_list(prefix: str, values: List[str]) -> Tuple[str, Dict]:
-    """
-    returns: (":p0,:p1,:p2", {"p0": v0, ...})
-    """
-    binds = []
-    params = {}
-    for i, v in enumerate(values):
-        k = f"{prefix}{i}"
-        binds.append(f":{k}")
-        params[k] = v
-    return ", ".join(binds), params
-
-
-def fetch_latest_wf_and_task_statuses(since_dt: datetime) -> List[Tuple]:
-    """
-    На каждый workflow берём самый свежий run (после since_dt),
-    и проверяем по нему:
-      - статус WF (END_TIME, RUN_ERR_CODE)
-      - статус конкретного task instance_name из OPB_SWIDGINST_LOG
-    Возвращаем по 1 строке на workflow:
-      (workflow_name, workflow_run_id, wf_start, wf_end, wf_err_code,
-       task_name, task_start, task_end, task_last_err_code, affected_rows)
-    """
-    workflows = list(WF_TASKS.keys())
-    tasks = list(WF_TASKS.values())
-
-    wf_in, wf_params = _bind_list("wf", workflows)
-    task_in, task_params = _bind_list("tsk", tasks)
-
-    params = {"since_dt": since_dt, **wf_params, **task_params}
-
-    sql = f"""
-        WITH last_run AS (
-            SELECT
-                r1.workflow_id,
-                r1.workflow_name,
-                r1.workflow_run_id,
-                r1.start_time AS wf_start_time,
-                r1.end_time   AS wf_end_time,
-                r1.run_err_code AS wf_run_err_code,
-                ROW_NUMBER() OVER (PARTITION BY r1.workflow_id ORDER BY r1.start_time DESC) AS rn
-            FROM RB_REP.OPB_WFLOW_RUN r1
-            WHERE r1.workflow_name IN ({wf_in})
-              AND r1.start_time >= :since_dt
-        )
-        SELECT
-            lr.workflow_name,
-            lr.workflow_run_id,
-            lr.wf_start_time,
-            lr.wf_end_time,
-            lr.wf_run_err_code,
-
-            lg.instance_name AS task_name,
-            lg.start_time    AS task_start_time,
-            lg.end_time      AS task_end_time,
-            lg.last_err_code AS task_last_err_code,
-            NVL(lg.affected_rows, 0) AS affected_rows
-        FROM last_run lr
-        LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
-               ON lg.workflow_id = lr.workflow_id
-              AND lg.workflow_run_id = lr.workflow_run_id
-              AND lg.instance_name IN ({task_in})
-        WHERE lr.rn = 1
-        ORDER BY lr.workflow_name
-    """
-    return _oracle_fetch(sql, params)
-
-
-def compute_status(row: Tuple) -> Tuple[str, str]:
-    """
-    Возвращает (wf_status, task_status) из одной строки.
-    """
-    (
-        workflow_name,
-        workflow_run_id,
-        wf_start,
-        wf_end,
-        wf_err,
-        task_name,
-        task_start,
-        task_end,
-        task_last_err,
-        affected_rows,
-    ) = row
-
-    # WF status
-    if wf_start is None:
-        wf_status = "NOT STARTED"
-    elif wf_end is None:
-        wf_status = "RUNNING"
-    elif (wf_err is not None) and int(wf_err) != 0:
-        wf_status = "ERROR/WARNING"
-    else:
-        wf_status = "SUCCESS"
-
-    # TASK status (именно по instance_name)
-    if task_name is None:
-        task_status = "NOT FOUND"
-    elif task_start is None:
-        task_status = "NOT STARTED"
-    elif task_end is None:
-        task_status = "RUNNING"
-    elif (task_last_err is not None) and int(task_last_err) != 0:
-        task_status = "ERROR/WARNING"
-    else:
-        task_status = "SUCCESS"
-
-    return wf_status, task_status
-
-
-def all_wf_and_tasks_finished(**context) -> bool:
-    """
-    Sensor TRUE только когда для каждого workflow:
-      - workflow завершён (wf_end_time not null)
-      - нужный task завершён (task_end_time not null)
-    Ошибки допускаем как "finished" (чтобы отправить уведомление),
-    но RUNNING/NOT STARTED/NOT FOUND — продолжаем ждать.
-    """
-    logical_date = context["logical_date"]
-    since_dt = logical_date.in_timezone(TZ).start_of("day").naive()
-
-    rows = fetch_latest_wf_and_task_statuses(since_dt)
-    by_wf = {r[0]: r for r in rows}
-
-    # если какого-то workflow нет в последнем запуске — ждём
-    for wf in WF_TASKS.keys():
-        if wf not in by_wf:
-            return False
-
-    for wf, row in by_wf.items():
-        wf_status, task_status = compute_status(row)
-        if wf_status in ("NOT STARTED", "RUNNING"):
-            return False
-        if task_status in ("NOT FOUND", "NOT STARTED", "RUNNING"):
-            return False
-
-        # финал OK: SUCCESS или ERROR/WARNING — считаем "завершено"
-        # (уведомление потом покажет статус)
-    return True
-
-
-def build_summary(rows: List[Tuple]) -> str:
-    now_str = pendulum.now(TZ).to_datetime_string()
-    lines = [f"📌 <b>PFM Informatica</b> — итог (WF + TASK) ({now_str})", ""]
-
-    for row in rows:
-        (
-            workflow_name,
-            workflow_run_id,
-            wf_start,
-            wf_end,
-            wf_err,
-            task_name,
-            task_start,
-            task_end,
-            task_last_err,
-            affected_rows,
-        ) = row
-
-        wf_status, task_status = compute_status(row)
-
-        # общий индикатор
-        ok = (wf_status == "SUCCESS") and (task_status == "SUCCESS")
-        icon = "✅" if ok else "⚠️"
-
-        lines.append(
-            f"{icon} <b>{workflow_name}</b>\n"
-            f"WF: <b>{wf_status}</b> | start: <b>{wf_start}</b> | end: <b>{wf_end}</b> | err: <b>{wf_err}</b>\n"
-            f"TASK: <b>{task_name}</b> — <b>{task_status}</b> | start: <b>{task_start}</b> | end: <b>{task_end}</b> | err: <b>{task_last_err}</b>\n"
-            f"AFFECTED_ROWS: <b>{affected_rows}</b>\n"
-        )
-
-    return "\n".join(lines)
-
-
-def send_telegram_summary(**context):
-    bot_token = context["var"]["value"].get("telegram_bot_token")
-    chat_id = context["var"]["value"].get("telegram_notifications_chat_id")
-    proxies = {
-        "http": context["var"]["value"].get("http_proxy"),
-        "https": context["var"]["value"].get("https_proxy"),
-    }
-
-    notifier = TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
-
-    logical_date = context["logical_date"]
-    since_dt = logical_date.in_timezone(TZ).start_of("day").naive()
-
-    rows = fetch_latest_wf_and_task_statuses(since_dt)
-    message = build_summary(rows)
-    notifier.send_message(message, proxies)
-
-
-with DAG(
-    dag_id="pfm_notify_after_informatica_wf_and_task_done_every_tuesday",
-    default_args=default_args,
-    schedule="5 0 * * 2",  # каждый вторник 00:05
-    catchup=False,
-    tags=["pfm", "informatica", "telegram"],
-) as dag:
-
-    wait_all_finished = PythonSensor(
-        task_id="wait_all_wf_and_tasks_finished",
-        python_callable=all_wf_and_tasks_finished,
-        mode="reschedule",
-        poke_interval=10 * 60,
-        timeout=20 * 60 * 60,
-    )
-
-    notify = PythonOperator(
-        task_id="send_telegram_after_all_finished",
-        python_callable=send_telegram_summary,
-    )
-
-    wait_all_finished >> notify
+  n.tsk AS expected_task,
+  lg.instance_name AS found_task,
+  lg.start_time AS task_start_time,
+  lg.end_time   AS task_end_time,
+  lg.last_err_code AS task_last_err_code,
+  CASE
+    WHEN lr.workflow_run_id IS NULL THEN 'NO RUN'
+    WHEN lg.instance_name IS NULL THEN 'TASK NOT FOUND'
+    WHEN lg.end_time IS NULL THEN 'TASK RUNNING'
+    WHEN NVL(lg.last_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+    ELSE 'TASK SUCCESS'
+  END AS task_status
+FROM need n
+LEFT JOIN last_run lr
+  ON lr.workflow_name = n.wf AND lr.rn = 1
+LEFT JOIN RB_REP.OPB_SWIDGINST_LOG lg
+  ON lg.workflow_id = lr.workflow_id
+ AND lg.workflow_run_id = lr.workflow_run_id
+ AND lg.instance_name = n.tsk
+ORDER BY workflow_name;

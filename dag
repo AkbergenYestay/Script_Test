@@ -1,18 +1,7 @@
 WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account'  wf,
-           's_m_PROD_account_edw_to_operations' task,
-           's_m_PROD_account_edw_to_operations%' inst_like
-    FROM dual
-    UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit',
-           's_m_PROD_deposit_edw_to_operations',
-           's_m_PROD_deposit_edw_to_operations%'
-    FROM dual
-    UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway',
-           's_m_PROD_openway_edw_to_operations',
-           's_m_PROD_openway_edw_to_operations%'
-    FROM dual
+    SELECT 'wf_PROD_edw_to_operations_account'  wf, 's_m_PROD_account_edw_to_operations'  task FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_deposit', 's_m_PROD_deposit_edw_to_operations'       FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_openway', 's_m_PROD_openway_edw_to_operations'       FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -34,19 +23,16 @@ task_run AS (
         MAX(t.end_time)   AS task_end_time,
         MAX(t.run_err_code) AS task_err_code
     FROM RB_REP.OPB_TASK_INST_RUN t
-    WHERE trunc(t.start_time) = trunc(sysdate)
-      AND t.task_type = 68
+    WHERE t.task_type = 68
     GROUP BY t.workflow_run_id, t.task_name
 ),
 ins_rows AS (
     SELECT
         s.workflow_run_id,
-        s.instance_name,
         MAX(s.affected_rows) AS inserted_rows,
         MAX(s.last_err_code) AS last_err_code
     FROM RB_REP.OPB_SWIDGINST_LOG s
-    WHERE trunc(s.start_time) = trunc(sysdate)
-    GROUP BY s.workflow_run_id, s.instance_name
+    GROUP BY s.workflow_run_id
 )
 SELECT
     n.wf AS workflow_name,
@@ -73,12 +59,10 @@ SELECT
     NVL(ir.inserted_rows, 0) AS inserted_rows
 FROM need n
 LEFT JOIN last_wf_run w
-    ON w.workflow_name = n.wf
-   AND w.rn = 1
+    ON w.workflow_name = n.wf AND w.rn = 1
 LEFT JOIN task_run tr
     ON tr.workflow_run_id = w.workflow_run_id
    AND tr.task_name = n.task
 LEFT JOIN ins_rows ir
     ON ir.workflow_run_id = w.workflow_run_id
-   AND LOWER(ir.instance_name) LIKE LOWER(n.inst_like)
 ORDER BY n.wf;

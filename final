@@ -1,8 +1,15 @@
 WITH uuid_cte AS (
     SELECT gen_random_uuid()::text AS sid
+),
+upd AS (
+    UPDATE pfm.pfm_top1mcg t
+    SET subscription_id = u.sid,
+        partition_id    = (mod(abs(hashtext(coalesce(t.iin, ''))), 4) + 1)
+    FROM uuid_cte u
+    WHERE t.subscription_id IS NULL
+      AND t.upload_date = CURRENT_DATE
+    RETURNING u.sid
 )
-UPDATE pfm.pfm_top1mcg
-SET subscription_id = (SELECT sid FROM uuid_cte),
-    partition_id = (mod(abs(hashtext(coalesce(iin, ''))), 4) + 1)
-WHERE subscription_id IS NULL
-  AND upload_date = CURRENT_DATE;
+SELECT SETVARIABLE('$$v_subscription_id', sid)
+FROM upd
+LIMIT 1;

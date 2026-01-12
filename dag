@@ -1,118 +1,84 @@
-from datetime import datetime, timedelta
-from typing import Tuple
-
-import pendulum
-from airflow import DAG
-from airflow.operators.python_operator import PythonOperator
-from airflow.providers.oracle.hooks.oracle import OracleHook
-
-from source.telegram_notifier import TelegramNotifier
-
-
-default_args = { 
-    "depends_on_past": False,
-    "start_date": pendulum.datetime(2025, 12, 23, tz="Asia/Oral"),
-    "retries": 1,
-    "retry_delay": timedelta(minutes=15),
-    "owner": "Yestay",
-}
-
-def format_message(
-    workflow_name: str,
-    repo_name: str,
-    status: str,
-    inserted_rows: int,
-    START_TIME: datetime,
-    END_TIME: datetime,
-) -> str:
-    # message = f"✅ <b>Yahoo Finance Scraper</b> fetched <u>{result_set[0]}</u> records on <i>{pendulum.now('Asia/Oral').to_datetime_string()}</i>"
-    err_message = f"✅ Процесс — <b>{workflow_name}</b> из репозитория — <b>{repo_name}</b> завершился со статусом <b>{status}</b>:\nINSERTED ROWS - <b>{inserted_rows}</b>;\nSTART_TIME - <b>{START_TIME}</b>;\nEND_TIME - <b>{END_TIME}</b>."
-    return err_message
-
-
-def fetch_error_tuples(oracle_hook: OracleHook, sql_statement: str) -> Tuple[str, str, str]:
-    connection = oracle_hook.get_conn()
-    with connection.cursor() as cursor:
-        result_set = cursor.execute(sql_statement).fetchall()
-    connection.close()
-    return result_set
-
-
-def check_and_alert(**context):
-    bot_token = context["var"]["value"].get("telegram_bot_token")
-    chat_id = context["var"]["value"].get("telegram_notifications_chat_id")
-    proxies = {
-        "http": context["var"]["value"].get("http_proxy"),
-        "https": context["var"]["value"].get("https_proxy"),
-    }
-
-    notifier = TelegramNotifier(bot_token=bot_token, chat_id=chat_id)
-    error_fetching_sql = """
-            SELECT WORKFLOW_NAME,
-            REPO_NAME,
-            STATUS,
-            INSERTED_ROWS,
-            START_TIME,
-            END_TIME 
-            FROM (SELECT DISTINCT 
-                    R1.WORKFLOW_NAME,
-                    'RB_REP' AS REPO_NAME,
-                    CASE
-                    WHEN R2.LAST_ERR_CODE <> 0 THEN
-                    'ERROR/WARNING'
-                    WHEN R2.LAST_ERR_CODE = 0 AND
-                        R3.START_TIME IS NOT NULL AND
-                        R3.END_TIME IS NULL THEN
-                    'RUNNING'
-                    WHEN R3.START_TIME IS NULL THEN
-                    'NOT STARTED'
-                    ELSE
-                    'SUCCESS'
-                    END STATUS,
-                    MAX(AFFECTED_ROWS) AS INSERTED_ROWS,
-                    MAX(R3.START_TIME) as START_TIME,
-                    MAX(R3.END_TIME) as END_TIME,
-                    ROW_NUMBER() OVER (PARTITION BY R1.WORKFLOW_ID ORDER BY R3.START_TIME desc) AS rn
-                FROM RB_REP.OPB_WFLOW_RUN R1
-                LEFT JOIN RB_REP.OPB_SWIDGINST_LOG R2
-                    ON R1.WORKFLOW_ID = R2.WORKFLOW_ID
-                    and INSTANCE_NAME in ('pfm_top1mcg1', 'pfm_top3_transactions1', 'pfm_top3_merchants1')
-                AND R1.WORKFLOW_RUN_ID = R2.WORKFLOW_RUN_ID
-                LEFT JOIN RB_REP.OPB_WFLOW_RUN R3
-                    ON R1.WORKFLOW_ID = R3.WORKFLOW_ID
-                AND R1.WORKFLOW_RUN_ID = R3.WORKFLOW_RUN_ID --AND R2.START_TIME >= trunc(sysdate)-1 
-                GROUP BY R2.INSTANCE_NAME, 
-                        R1.WORKFLOW_ID,
-                        R1.WORKFLOW_NAME,
-                        R3.START_TIME,
-                        R3.END_TIME,
-                        R3.RUN_ERR_CODE,
-                        R2.LAST_ERR_CODE,
-                        R2.LAST_ERR_MSG)
-            WHERE WORKFLOW_NAME in ('wf_w4_pfm_top1mcg', 'wf_w4_pfm_top3_transactions', 'wf_w4_pfm_top3_merchants', 'wf_w4_pfm_treat_yourself')
-            AND rn = 1
-
-    """
-    errors = fetch_error_tuples(
-        OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True), error_fetching_sql
-    )
-
-    for workflow_name, repo_name, status, inserted_rows, start_time, end_time in errors:
-        message = format_message(workflow_name, repo_name, status, inserted_rows, start_time, end_time)
-        response = notifier.send_message(message, proxies)
-
-
-with DAG(
-    dag_id="pfm_start_every_tuesday",
-    default_args=default_args,
-    schedule="0 14 * * 2",
-    catchup=False,
-    tags=["pfm"],
-) as dag:
-    check_and_alert_task = PythonOperator(
-        task_id="fetch_ipc_errors",
-        python_callable=check_and_alert,
-        dag=dag,
-    )
-
-check_and_alert_task
+WITH need AS (
+    SELECT 'wf_PROD_edw_to_operations_account'  wf,
+           's_m_PROD_account_edw_to_operations' task,
+           's_m_PROD_account_edw_to_operations%' inst_like
+    FROM dual
+    UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_deposit',
+           's_m_PROD_deposit_edw_to_operations',
+           's_m_PROD_deposit_edw_to_operations%'
+    FROM dual
+    UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_openway',
+           's_m_PROD_openway_edw_to_operations',
+           's_m_PROD_openway_edw_to_operations%'
+    FROM dual
+),
+last_wf_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time AS wf_start_time,
+        r.end_time   AS wf_end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE trunc(r.start_time) = trunc(sysdate)
+),
+task_run AS (
+    SELECT
+        t.workflow_run_id,
+        t.task_name,
+        MAX(t.start_time) AS task_start_time,
+        MAX(t.end_time)   AS task_end_time,
+        MAX(t.run_err_code) AS task_err_code
+    FROM RB_REP.OPB_TASK_INST_RUN t
+    WHERE trunc(t.start_time) = trunc(sysdate)
+      AND t.task_type = 68
+    GROUP BY t.workflow_run_id, t.task_name
+),
+ins_rows AS (
+    SELECT
+        s.workflow_run_id,
+        s.instance_name,
+        MAX(s.affected_rows) AS inserted_rows,
+        MAX(s.last_err_code) AS last_err_code
+    FROM RB_REP.OPB_SWIDGINST_LOG s
+    WHERE trunc(s.start_time) = trunc(sysdate)
+    GROUP BY s.workflow_run_id, s.instance_name
+)
+SELECT
+    n.wf AS workflow_name,
+    'RB_REP' AS repo_name,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
+        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END AS wf_status,
+    n.task AS task_name,
+    tr.task_start_time,
+    tr.task_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
+        WHEN tr.task_name IS NULL THEN 'TASK NOT FOUND'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
+        WHEN NVL(tr.task_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END AS task_status,
+    NVL(ir.inserted_rows, 0) AS inserted_rows
+FROM need n
+LEFT JOIN last_wf_run w
+    ON w.workflow_name = n.wf
+   AND w.rn = 1
+LEFT JOIN task_run tr
+    ON tr.workflow_run_id = w.workflow_run_id
+   AND tr.task_name = n.task
+LEFT JOIN ins_rows ir
+    ON ir.workflow_run_id = w.workflow_run_id
+   AND LOWER(ir.instance_name) LIKE LOWER(n.inst_like)
+ORDER BY n.wf;

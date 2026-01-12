@@ -1,15 +1,10 @@
-WITH uuid_cte AS (
-    SELECT gen_random_uuid()::text AS sid
-),
-upd AS (
-    UPDATE pfm.pfm_top1mcg t
-    SET subscription_id = u.sid,
-        partition_id    = (mod(abs(hashtext(coalesce(t.iin, ''))), 4) + 1)
-    FROM uuid_cte u
-    WHERE t.subscription_id IS NULL
-      AND t.upload_date = CURRENT_DATE
-    RETURNING u.sid
-)
-SELECT SETVARIABLE('$$v_subscription_id', sid)
-FROM upd
-LIMIT 1;
+INSERT INTO pfm.pfm_top_table_load_status
+  (table_name, status, message)
+VALUES
+  ('PFM_TOP1MCG', 'SUCCESS',
+   CONCAT('wf=', '$PMWorkflowName',
+          '; run_id=', '$PMWorkflowRunId',
+          '; sess=', 's_load_main',
+          '; rows=', '$$rows_loaded'))
+ON CONFLICT ON CONSTRAINT pfm_top_table_load_status_table_name_status_load_date_key
+DO NOTHING;

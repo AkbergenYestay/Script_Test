@@ -23,11 +23,16 @@ default_args = {
 }
 
 
-SQL_MONITOR_WF_AND_TASK = """
+SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account' wf,  's_m_PROD_account_edw_to_operations'  task_name FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit',      's_m_PROD_deposit_edw_to_operations'      FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway',      's_m_PROD_openway_edw_to_operations'      FROM dual
+    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
+    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
+    SELECT 8671, 8679 FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
+    SELECT 8690, 8696 FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -40,6 +45,7 @@ last_wf_run AS (
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
     WHERE trunc(r.start_time) = trunc(sysdate)
+      AND r.workflow_id IN (SELECT workflow_id FROM need)
 ),
 ins_rows AS (
     SELECT
@@ -48,33 +54,24 @@ ins_rows AS (
     FROM RB_REP.OPB_SWIDGINST_LOG s
     GROUP BY s.workflow_run_id
 ),
-task_inst AS (
-    SELECT
-        ti.workflow_id,
-        ti.instance_id,
-        LOWER(ti.instance_name) AS instance_name
-    FROM RB_REP.OPB_TASK_INST ti
-    WHERE ti.task_type = 68
-),
 last_task_run AS (
     SELECT
         tr.workflow_run_id,
         tr.instance_id,
-        LOWER(tr.instance_name) AS instance_name,
+        tr.instance_name,
         tr.start_time AS task_start_time,
         tr.end_time   AS task_end_time,
         tr.run_err_code AS task_run_err_code,
-        tr.run_status_code AS task_run_status_code,
         ROW_NUMBER() OVER (
             PARTITION BY tr.workflow_run_id, tr.instance_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
     WHERE trunc(tr.start_time) = trunc(sysdate)
-      AND LOWER(tr.instance_name) NOT LIKE '%sys_dependency%'
+      AND tr.instance_id IN (SELECT task_id FROM need)
 )
 SELECT
-    n.wf AS workflow_name,
+    w.workflow_name,
     w.workflow_id,
     w.workflow_run_id,
     w.wf_start_time,
@@ -87,12 +84,11 @@ SELECT
     END AS wf_status,
     NVL(ir.inserted_rows, 0) AS inserted_rows,
 
-    n.task_name AS expected_task_name,
+    n.task_id,
     tr.task_start_time,
     tr.task_end_time,
     CASE
         WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
-        WHEN ti.instance_id IS NULL THEN 'TASK NOT FOUND'
         WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
         WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
         WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
@@ -100,18 +96,15 @@ SELECT
     END AS task_status
 FROM need n
 LEFT JOIN last_wf_run w
-    ON w.workflow_name = n.wf
+    ON w.workflow_id = n.workflow_id
    AND w.rn = 1
 LEFT JOIN ins_rows ir
     ON ir.workflow_run_id = w.workflow_run_id
-LEFT JOIN task_inst ti
-    ON ti.workflow_id = w.workflow_id
-   AND ti.instance_name = LOWER(n.task_name)
 LEFT JOIN last_task_run tr
     ON tr.workflow_run_id = w.workflow_run_id
-   AND tr.instance_id = ti.instance_id
+   AND tr.instance_id = n.task_id
    AND tr.rn = 1
-ORDER BY n.wf
+ORDER BY n.workflow_id
 """
 
 
@@ -120,7 +113,7 @@ def _fetch_df():
     conn = oracle_hook.get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(SQL_MONITOR_WF_AND_TASK)
+            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
             rows = cursor.fetchall()
             cols = [c[0] for c in cursor.description]
     finally:
@@ -205,8 +198,8 @@ with DAG(
         task_id="wait_all_workflows_done",
         python_callable=wait_all_done,
         mode="reschedule",
-        poke_interval=900,      # каждые 15 минут
-        timeout=16 * 60 * 60,   # до ~00:00
+        poke_interval=900,
+        timeout=16 * 60 * 60,
     )
 
     notify = PythonOperator(

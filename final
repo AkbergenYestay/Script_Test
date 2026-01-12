@@ -174,7 +174,7 @@ def send_status_email(**context):
 
     send_email(
         to=default_args["email"],
-        subject="PFM acc / dep / openway — статус загрузок",
+        subject="PFM account / deposit / openway — статус загрузок",
         html_content="".join(lines),
     )
 

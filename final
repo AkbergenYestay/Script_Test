@@ -1,15 +1,12 @@
 import datetime
-import subprocess
 import pandas as pd
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.utils.email import send_email
 from airflow.models import Variable
-
-
-DAG_ID = "pfm_acc_dep_openway_monitoring"
 
 
 default_args = {
@@ -26,18 +23,7 @@ default_args = {
 }
 
 
-def check_send_and_pause():
-    today = datetime.date.today().isoformat()
-    now = datetime.datetime.now()
-
-    print(f"[INFO] DAG run at {now}")
-
-    oracle_hook = OracleHook(
-        oracle_conn_id="db_oracle_ipc__edw_ipc",
-        thick_mode=True,
-    )
-
-    sql = """
+SQL_MONITOR = """
 WITH need AS (
     SELECT 'wf_PROD_edw_to_operations_account' wf FROM dual UNION ALL
     SELECT 'wf_PROD_edw_to_operations_deposit' FROM dual UNION ALL
@@ -76,36 +62,67 @@ SELECT
     NVL(ir.inserted_rows, 0) AS inserted_rows
 FROM need n
 LEFT JOIN last_wf_run w
-    ON w.workflow_name = n.wf AND w.rn = 1
+    ON w.workflow_name = n.wf
+   AND w.rn = 1
 LEFT JOIN ins_rows ir
     ON ir.workflow_run_id = w.workflow_run_id
 ORDER BY n.wf
 """
 
+
+def _fetch_df():
+    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
     conn = oracle_hook.get_conn()
-    with conn.cursor() as cursor:
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        cols = [c[0] for c in cursor.description]
-    conn.close()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(SQL_MONITOR)
+            rows = cursor.fetchall()
+            cols = [c[0] for c in cursor.description]
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=cols)
 
-    df = pd.DataFrame(rows, columns=cols)
+
+def wait_all_done(**context):
+    today = context["logical_date"].date().isoformat()
+    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
+    print(f"[INFO] logical_date={context['logical_date']}, today={today}, last_sent={last_sent}")
+
+    if last_sent == today:
+        print("[INFO] Email already sent for this logical date. Sensor succeeds.")
+        return True
+
+    df = _fetch_df()
     print(f"[INFO] Rows fetched: {len(df)}")
-
     if df.empty:
-        print("[INFO] No data yet")
-        return
+        print("[INFO] No rows yet. Waiting...")
+        return False
 
     not_finished = df[
         df["WORKFLOW_RUN_ID"].isna()
         | df["WF_END_TIME"].isna()
     ]
+    print(f"[INFO] Not finished workflows: {len(not_finished)}")
 
     if not not_finished.empty:
-        print("[INFO] Workflows still running — continue waiting")
+        print("[INFO] Some workflows not finished. Waiting...")
+        return False
+
+    print("[INFO] All workflows finished. Sensor succeeds.")
+    return True
+
+
+def send_status_email(**context):
+    today = context["logical_date"].date().isoformat()
+    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
+    print(f"[INFO] Sending step. today={today}, last_sent={last_sent}")
+
+    if last_sent == today:
+        print("[INFO] Email already sent for this logical date. Skipping send.")
         return
 
-    print("[INFO] All workflows finished — sending email")
+    df = _fetch_df()
+    print(f"[INFO] Rows fetched for email: {len(df)}")
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
     for _, r in df.iterrows():
@@ -123,27 +140,30 @@ ORDER BY n.wf
         html_content="".join(lines),
     )
 
-    print("[INFO] Email sent — pausing DAG")
-
-    # 🔴 SELF-PAUSE
-    subprocess.run(
-        ["airflow", "dags", "pause", DAG_ID],
-        check=True,
-    )
+    Variable.set("pfm_acc_dep_openway_email_sent", today)
+    print(f"[INFO] Email sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
 
 
 with DAG(
-    dag_id=DAG_ID,
+    dag_id="pfm_acc_dep_openway_monitoring_daily",
     default_args=default_args,
     start_date=datetime.datetime(2025, 1, 1),
-    schedule="*/15 8-23 * * *",
+    schedule="0 8 * * *",
     catchup=False,
     tags=["pfm"],
 ) as dag:
 
-    monitor_and_pause = PythonOperator(
-        task_id="check_send_and_pause",
-        python_callable=check_send_and_pause,
+    wait = PythonSensor(
+        task_id="wait_all_workflows_done",
+        python_callable=wait_all_done,
+        mode="reschedule",
+        poke_interval=900,      # каждые 15 минут
+        timeout=16 * 60 * 60,   # 16 часов (до 00:00 примерно)
     )
 
-    monitor_and_pause
+    notify = PythonOperator(
+        task_id="send_email",
+        python_callable=send_status_email,
+    )
+
+    wait >> notify

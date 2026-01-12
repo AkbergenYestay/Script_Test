@@ -1,154 +1,36 @@
 import datetime
-import pandas as pd
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
-from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.utils.email import send_email
 from airflow.models import Variable
 
 
 default_args = {
     "owner": "Yestay",
-    "email": [
-        "AlmasA@halykbank.kz",
-        "EstayA@halykbank.kz",
-        "QuanysQo@halykbank.kz",
-        "AIYGERIMIB@halykbank.kz",
-        "DaniyarMussa@halykbank.kz",
-    ],
-    "email_on_failure": True,
     "depends_on_past": False,
 }
 
 
-def check_and_send_email():
-    now = datetime.datetime.now()
-    today = datetime.date.today().isoformat()
-
-    print(f"[INFO] DAG run at {now}")
-    print(f"[INFO] Today: {today}")
-
-    last_sent = Variable.get(
+def reset_variable():
+    Variable.set(
         "pfm_acc_dep_openway_email_sent",
-        default_var="1970-01-01",
+        "1970-01-01",
     )
-    print(f"[INFO] Last email sent date: {last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Email already sent today. Skipping execution.")
-        return
-
-    oracle_hook = OracleHook(
-        oracle_conn_id="db_oracle_ipc__edw_ipc",
-        thick_mode=True,
-    )
-
-    sql = """
-WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account' wf FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit' FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway' FROM dual
-),
-last_wf_run AS (
-    SELECT
-        r.workflow_id,
-        r.workflow_name,
-        r.workflow_run_id,
-        r.start_time AS wf_start_time,
-        r.end_time   AS wf_end_time,
-        r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE trunc(r.start_time) = trunc(sysdate)
-),
-ins_rows AS (
-    SELECT
-        s.workflow_run_id,
-        MAX(s.affected_rows) AS inserted_rows
-    FROM RB_REP.OPB_SWIDGINST_LOG s
-    GROUP BY s.workflow_run_id
-)
-SELECT
-    n.wf AS workflow_name,
-    w.workflow_run_id,
-    w.wf_start_time,
-    w.wf_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS wf_status,
-    NVL(ir.inserted_rows, 0) AS inserted_rows
-FROM need n
-LEFT JOIN last_wf_run w
-    ON w.workflow_name = n.wf
-   AND w.rn = 1
-LEFT JOIN ins_rows ir
-    ON ir.workflow_run_id = w.workflow_run_id
-ORDER BY n.wf
-"""
-
-    conn = oracle_hook.get_conn()
-    with conn.cursor() as cursor:
-        cursor.execute(sql)
-        rows = cursor.fetchall()
-        cols = [c[0] for c in cursor.description]
-    conn.close()
-
-    df = pd.DataFrame(rows, columns=cols)
-    print(f"[INFO] Rows fetched from DB: {len(df)}")
-
-    if df.empty:
-        print("[WARN] Query returned empty result. Nothing to process.")
-        return
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-    ]
-
-    print(f"[INFO] Not finished workflows count: {len(not_finished)}")
-
-    if not not_finished.empty:
-        print("[INFO] Some workflows are still running or not started. Email will NOT be sent.")
-        return
-
-    print("[INFO] All workflows finished. Preparing email.")
-
-    lines = [f"<b>Дата:</b> {today}<br><br>"]
-    for _, r in df.iterrows():
-        lines.append(
-            f"<b>{r['WORKFLOW_NAME']}</b><br>"
-            f"Старт: {r['WF_START_TIME']}<br>"
-            f"Завершение: {r['WF_END_TIME']}<br>"
-            f"Статус: {r['WF_STATUS']}<br>"
-            f"Количество записей: {int(r['INSERTED_ROWS'])}<br><br>"
-        )
-
-    send_email(
-        to=default_args["email"],
-        subject="PFM acc / dep / openway — статус загрузок",
-        html_content="".join(lines),
-    )
-
-    Variable.set("pfm_acc_dep_openway_email_sent", today)
-    print(f"[INFO] Email successfully sent. Variable set to {today}")
+    print("[INFO] Variable pfm_acc_dep_openway_email_sent manually reset to 1970-01-01")
 
 
 with DAG(
-    dag_id="pfm_acc_dep_openway_monitoring",
+    dag_id="pfm_reset_email_variable_manual",
     default_args=default_args,
     start_date=datetime.datetime(2025, 1, 1),
-    schedule="*/15 8-23 * * *",
+    schedule=None,          # ⛔ без расписания — только вручную
     catchup=False,
     tags=["pfm"],
 ) as dag:
 
-    check_and_send = PythonOperator(
-        task_id="check_and_send_email",
-        python_callable=check_and_send_email,
+    reset = PythonOperator(
+        task_id="reset_email_variable_manual",
+        python_callable=reset_variable,
     )
 
-    check_and_send
+    reset

@@ -1,0 +1,114 @@
+import datetime
+import pandas as pd
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.utils.email import send_email
+
+
+default_args = {
+    "owner": "Yestay",
+    "email": [
+        "AlmasA@halykbank.kz",
+        "EstayA@halykbank.kz",
+        "QuanysQo@halykbank.kz",
+        "AIYGERIMIB@halykbank.kz",
+        "DaniyarMussa@halykbank.kz",
+    ],
+    "email_on_failure": True,
+    "depends_on_past": False,
+}
+
+
+def check_and_send_email():
+    oracle_hook = OracleHook(
+        oracle_conn_id="db_oracle_ipc__edw_ipc",
+        thick_mode=True,
+    )
+
+    sql = """
+WITH need AS (
+    SELECT 'wf_PROD_edw_to_operations_account'  wf, 's_m_PROD_account_edw_to_operations'  task FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_deposit', 's_m_PROD_deposit_edw_to_operations'       FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_openway', 's_m_PROD_openway_edw_to_operations'       FROM dual
+),
+last_wf_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time,
+        r.end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE trunc(r.start_time) = trunc(sysdate)
+),
+joined AS (
+    SELECT
+        n.wf,
+        n.task,
+        w.workflow_run_id,
+        w.start_time wf_start_time,
+        w.end_time   wf_end_time,
+        w.run_err_code wf_err,
+        t.start_time task_start_time,
+        t.end_time   task_end_time,
+        t.run_err_code task_err
+    FROM need n
+    LEFT JOIN last_wf_run w
+        ON w.workflow_name = n.wf
+       AND w.rn = 1
+    LEFT JOIN RB_REP.OPB_TASK_INST_RUN t
+        ON t.workflow_run_id = w.workflow_run_id
+       AND t.task_name = n.task
+       AND t.task_type = 68
+)
+SELECT *
+FROM joined
+ORDER BY wf
+"""
+
+    conn = oracle_hook.get_conn()
+    with conn.cursor() as cursor:
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        cols = [c[0] for c in cursor.description]
+    conn.close()
+
+    df = pd.DataFrame(rows, columns=cols)
+
+    if df.empty:
+        return
+
+    not_finished = df[
+        (df["WORKFLOW_RUN_ID"].isna())
+        | (df["WF_END_TIME"].isna())
+        | (df["TASK_END_TIME"].isna())
+    ]
+
+    if not_finished.empty:
+        html = df.to_html(index=False)
+        send_email(
+            to=default_args["email"],
+            subject="PFM EDW → Operations — все загрузки завершены",
+            html_content=html,
+        )
+
+
+with DAG(
+    dag_id="pfm_edw_to_operations_email_daily",
+    default_args=default_args,
+    start_date=datetime.datetime(2025, 1, 1),
+    schedule="30 8 * * *",
+    catchup=False,
+    tags=["pfm"],
+) as dag:
+
+    send_status = PythonOperator(
+        task_id="check_and_send_email",
+        python_callable=check_and_send_email,
+    )
+
+    send_status

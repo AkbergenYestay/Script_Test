@@ -11,9 +11,7 @@ from airflow.models import Variable
 
 default_args = {
     "owner": "Yestay",
-    "email": [
-        "EstayA@halykbank.kz",
-    ],
+    "email": ["EstayA@halykbank.kz"],
     "email_on_failure": True,
     "depends_on_past": False,
 }
@@ -60,7 +58,7 @@ last_task_run AS (
         tr.end_time   AS task_end_time,
         tr.run_err_code AS task_run_err_code,
         ROW_NUMBER() OVER (
-            PARTITION BY tr.workflow_run_id, tr.instance_id
+            PARTITION BY tr.workflow_run_id, tr.task_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
@@ -75,8 +73,8 @@ SELECT
     w.wf_end_time,
     CASE
         WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
         WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
         ELSE 'SUCCESS'
     END AS wf_status,
     NVL(ir.inserted_rows, 0) AS inserted_rows,
@@ -87,8 +85,8 @@ SELECT
     CASE
         WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
         WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
-        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
         WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
         ELSE 'TASK SUCCESS'
     END AS task_status
 FROM need n
@@ -105,7 +103,7 @@ ORDER BY n.workflow_id
 """
 
 
-def _fetch_df():
+def _fetch_df() -> pd.DataFrame:
     oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
     conn = oracle_hook.get_conn()
     try:
@@ -118,7 +116,7 @@ def _fetch_df():
     return pd.DataFrame(rows, columns=cols)
 
 
-def wait_all_done(**context):
+def wait_all_done(**context) -> bool:
     today = context["logical_date"].date().isoformat()
     last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
     print(f"[INFO] logical_date={context['logical_date']} today={today} last_sent={last_sent}")
@@ -129,26 +127,34 @@ def wait_all_done(**context):
 
     df = _fetch_df()
     print(f"[INFO] Rows fetched: {len(df)}")
+
     if df.empty:
-        print("[INFO] No rows yet. Waiting...")
+        print("[INFO] No rows returned by SQL. Waiting...")
         return False
 
-    not_finished = df[
+    not_ready = df[
         df["WORKFLOW_RUN_ID"].isna()
         | df["WF_END_TIME"].isna()
         | df["TASK_END_TIME"].isna()
+        | (df["WF_STATUS"] != "SUCCESS")
+        | (df["TASK_STATUS"] != "TASK SUCCESS")
     ]
 
-    print(f"[INFO] Not finished count: {len(not_finished)}")
-    if not not_finished.empty:
-        print("[INFO] Some workflows/tasks not finished. Waiting...")
+    print(f"[INFO] Not ready count: {len(not_ready)}")
+    if not not_ready.empty:
+        for _, r in not_ready.iterrows():
+            print(
+                f"[INFO] WAIT: wf={r['WORKFLOW_NAME']} "
+                f"wf_status={r['WF_STATUS']} wf_end={r['WF_END_TIME']} "
+                f"task_status={r['TASK_STATUS']} task_end={r['TASK_END_TIME']}"
+            )
         return False
 
-    print("[INFO] All workflows and tasks finished. Sensor succeeds.")
+    print("[INFO] All workflows and tasks are SUCCESS and finished. Sensor succeeds.")
     return True
 
 
-def send_status_email(**context):
+def send_status_email(**context) -> None:
     today = context["logical_date"].date().isoformat()
     last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
     print(f"[INFO] Sending step. today={today} last_sent={last_sent}")
@@ -162,7 +168,6 @@ def send_status_email(**context):
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
 
-    # В письме — только workflow (task не выводим)
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
@@ -195,8 +200,8 @@ with DAG(
         task_id="wait_all_workflows_done",
         python_callable=wait_all_done,
         mode="reschedule",
-        poke_interval=900,
-        timeout=16 * 60 * 60,
+        poke_interval=900,      # каждые 15 минут
+        timeout=16 * 60 * 60,   # до ~00:00
     )
 
     notify = PythonOperator(

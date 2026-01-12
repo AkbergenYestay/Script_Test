@@ -23,13 +23,20 @@ default_args = {
 
 
 def check_and_send_email():
+    now = datetime.datetime.now()
     today = datetime.date.today().isoformat()
+
+    print(f"[INFO] DAG run at {now}")
+    print(f"[INFO] Today: {today}")
 
     last_sent = Variable.get(
         "pfm_acc_dep_openway_email_sent",
         default_var="1970-01-01",
     )
+    print(f"[INFO] Last email sent date: {last_sent}")
+
     if last_sent == today:
+        print("[INFO] Email already sent today. Skipping execution.")
         return
 
     oracle_hook = OracleHook(
@@ -39,9 +46,9 @@ def check_and_send_email():
 
     sql = """
 WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account'  wf FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit'      FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway'      FROM dual
+    SELECT 'wf_PROD_edw_to_operations_account' wf FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_deposit' FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_openway' FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -91,8 +98,10 @@ ORDER BY n.wf
     conn.close()
 
     df = pd.DataFrame(rows, columns=cols)
+    print(f"[INFO] Rows fetched from DB: {len(df)}")
 
     if df.empty:
+        print("[WARN] Query returned empty result. Nothing to process.")
         return
 
     not_finished = df[
@@ -100,11 +109,15 @@ ORDER BY n.wf
         | df["WF_END_TIME"].isna()
     ]
 
+    print(f"[INFO] Not finished workflows count: {len(not_finished)}")
+
     if not not_finished.empty:
+        print("[INFO] Some workflows are still running or not started. Email will NOT be sent.")
         return
 
-    lines = [f"<b>Дата:</b> {today}<br><br>"]
+    print("[INFO] All workflows finished. Preparing email.")
 
+    lines = [f"<b>Дата:</b> {today}<br><br>"]
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
@@ -121,6 +134,7 @@ ORDER BY n.wf
     )
 
     Variable.set("pfm_acc_dep_openway_email_sent", today)
+    print(f"[INFO] Email successfully sent. Variable set to {today}")
 
 
 with DAG(

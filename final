@@ -1,3 +1,8 @@
-CREATE INDEX CONCURRENTLY ix_pfm_top1mcg_ud_nullsub
-ON pfm_top1mcg (upload_date)
-WHERE subscription_id IS NULL;
+WITH uuid_cte AS (
+    SELECT gen_random_uuid()::text AS sid
+)
+UPDATE pfm.pfm_top1mcg
+SET subscription_id = (SELECT sid FROM uuid_cte),
+    partition_id = (mod(abs(hashtext(coalesce(iin, ''))), 4) + 1)
+WHERE subscription_id IS NULL
+  AND upload_date = CURRENT_DATE;

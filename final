@@ -1,10 +1,17 @@
 INSERT INTO pfm.pfm_top_table_load_status
-  (table_name, status, message)
+  (table_name, status, subscription_id, message)
 VALUES
-  ('PFM_TOP1MCG', 'SUCCESS',
-   CONCAT('wf=', '$PMWorkflowName',
-          '; run_id=', '$PMWorkflowRunId',
-          '; sess=', 's_load_main',
-          '; rows=', '$$rows_loaded'))
-ON CONFLICT ON CONSTRAINT pfm_top_table_load_status_table_name_status_load_date_key
+  (
+    'PFM_TOP1MCG',
+    'SUCCESS',
+    '$$v_subscription_id',
+    CONCAT(
+      'wf=', '$PMWorkflowName',
+      '; run_id=', '$PMWorkflowRunId',
+      '; sess=', 's_load_main',
+      '; rows=', '$$rows_loaded'
+    )
+  )
+ON CONFLICT ON CONSTRAINT
+  pfm_top_table_load_status_table_name_status_load_date_key
 DO NOTHING;

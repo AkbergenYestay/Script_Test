@@ -1,68 +1,31 @@
-WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account'  wf, 's_m_PROD_account_edw_to_operations'  task FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit', 's_m_PROD_deposit_edw_to_operations'       FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway', 's_m_PROD_openway_edw_to_operations'       FROM dual
-),
-last_wf_run AS (
-    SELECT
-        r.workflow_id,
-        r.workflow_name,
-        r.workflow_run_id,
-        r.start_time AS wf_start_time,
-        r.end_time   AS wf_end_time,
-        r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE trunc(r.start_time) = trunc(sysdate)
-),
-task_run AS (
-    SELECT
-        t.workflow_run_id,
-        t.task_name,
-        MAX(t.start_time) AS task_start_time,
-        MAX(t.end_time)   AS task_end_time,
-        MAX(t.run_err_code) AS task_err_code
-    FROM RB_REP.OPB_TASK_INST_RUN t
-    WHERE t.task_type = 68
-    GROUP BY t.workflow_run_id, t.task_name
-),
-ins_rows AS (
-    SELECT
-        s.workflow_run_id,
-        MAX(s.affected_rows) AS inserted_rows,
-        MAX(s.last_err_code) AS last_err_code
-    FROM RB_REP.OPB_SWIDGINST_LOG s
-    GROUP BY s.workflow_run_id
-)
-SELECT
-    n.wf AS workflow_name,
-    'RB_REP' AS repo_name,
-    w.workflow_run_id,
-    w.wf_start_time,
-    w.wf_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS wf_status,
-    n.task AS task_name,
-    tr.task_start_time,
-    tr.task_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
-        WHEN tr.task_name IS NULL THEN 'TASK NOT FOUND'
-        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
-        WHEN NVL(tr.task_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS task_status,
-    NVL(ir.inserted_rows, 0) AS inserted_rows
-FROM need n
-LEFT JOIN last_wf_run w
-    ON w.workflow_name = n.wf AND w.rn = 1
-LEFT JOIN task_run tr
-    ON tr.workflow_run_id = w.workflow_run_id
-   AND tr.task_name = n.task
-LEFT JOIN ins_rows ir
-    ON ir.workflow_run_id = w.workflow_run_id
-ORDER BY n.wf;
+import datetime
+import subprocess
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+
+
+DAG_ID = "pfm_acc_dep_openway_monitoring"
+
+def unpause_dag():
+    subprocess.run(
+        ["airflow", "dags", "unpause", DAG_ID],
+        check=True,
+    )
+    print(f"[INFO] DAG {DAG_ID} unpaused")
+
+
+with DAG(
+    dag_id="pfm_acc_dep_openway_unpause",
+    start_date=datetime.datetime(2025, 1, 1),
+    schedule="5 0 * * *",
+    catchup=False,
+    tags=["pfm"],
+) as dag:
+
+    unpause = PythonOperator(
+        task_id="unpause_main_dag",
+        python_callable=unpause_dag,
+    )
+
+    unpause

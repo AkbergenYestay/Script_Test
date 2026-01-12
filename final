@@ -23,11 +23,11 @@ default_args = {
 }
 
 
-SQL_MONITOR = """
+SQL_MONITOR_WF_AND_TASK = """
 WITH need AS (
-    SELECT 'wf_PROD_edw_to_operations_account' wf FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_deposit' FROM dual UNION ALL
-    SELECT 'wf_PROD_edw_to_operations_openway' FROM dual
+    SELECT 'wf_PROD_edw_to_operations_account' wf,  's_m_PROD_account_edw_to_operations'  task_name FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_deposit',      's_m_PROD_deposit_edw_to_operations'      FROM dual UNION ALL
+    SELECT 'wf_PROD_edw_to_operations_openway',      's_m_PROD_openway_edw_to_operations'      FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -47,9 +47,35 @@ ins_rows AS (
         MAX(s.affected_rows) AS inserted_rows
     FROM RB_REP.OPB_SWIDGINST_LOG s
     GROUP BY s.workflow_run_id
+),
+task_inst AS (
+    SELECT
+        ti.workflow_id,
+        ti.instance_id,
+        LOWER(ti.instance_name) AS instance_name
+    FROM RB_REP.OPB_TASK_INST ti
+    WHERE ti.task_type = 68
+),
+last_task_run AS (
+    SELECT
+        tr.workflow_run_id,
+        tr.instance_id,
+        LOWER(tr.instance_name) AS instance_name,
+        tr.start_time AS task_start_time,
+        tr.end_time   AS task_end_time,
+        tr.run_err_code AS task_run_err_code,
+        tr.run_status_code AS task_run_status_code,
+        ROW_NUMBER() OVER (
+            PARTITION BY tr.workflow_run_id, tr.instance_id
+            ORDER BY tr.start_time DESC
+        ) rn
+    FROM RB_REP.OPB_TASK_INST_RUN tr
+    WHERE trunc(tr.start_time) = trunc(sysdate)
+      AND LOWER(tr.instance_name) NOT LIKE '%sys_dependency%'
 )
 SELECT
     n.wf AS workflow_name,
+    w.workflow_id,
     w.workflow_run_id,
     w.wf_start_time,
     w.wf_end_time,
@@ -59,13 +85,32 @@ SELECT
         WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
     END AS wf_status,
-    NVL(ir.inserted_rows, 0) AS inserted_rows
+    NVL(ir.inserted_rows, 0) AS inserted_rows,
+
+    n.task_name AS expected_task_name,
+    tr.task_start_time,
+    tr.task_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
+        WHEN ti.instance_id IS NULL THEN 'TASK NOT FOUND'
+        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
+        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+        ELSE 'TASK SUCCESS'
+    END AS task_status
 FROM need n
 LEFT JOIN last_wf_run w
     ON w.workflow_name = n.wf
    AND w.rn = 1
 LEFT JOIN ins_rows ir
     ON ir.workflow_run_id = w.workflow_run_id
+LEFT JOIN task_inst ti
+    ON ti.workflow_id = w.workflow_id
+   AND ti.instance_name = LOWER(n.task_name)
+LEFT JOIN last_task_run tr
+    ON tr.workflow_run_id = w.workflow_run_id
+   AND tr.instance_id = ti.instance_id
+   AND tr.rn = 1
 ORDER BY n.wf
 """
 
@@ -75,7 +120,7 @@ def _fetch_df():
     conn = oracle_hook.get_conn()
     try:
         with conn.cursor() as cursor:
-            cursor.execute(SQL_MONITOR)
+            cursor.execute(SQL_MONITOR_WF_AND_TASK)
             rows = cursor.fetchall()
             cols = [c[0] for c in cursor.description]
     finally:
@@ -86,10 +131,10 @@ def _fetch_df():
 def wait_all_done(**context):
     today = context["logical_date"].date().isoformat()
     last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] logical_date={context['logical_date']}, today={today}, last_sent={last_sent}")
+    print(f"[INFO] logical_date={context['logical_date']} today={today} last_sent={last_sent}")
 
     if last_sent == today:
-        print("[INFO] Email already sent for this logical date. Sensor succeeds.")
+        print("[INFO] Email already sent today. Sensor succeeds.")
         return True
 
     df = _fetch_df()
@@ -101,30 +146,33 @@ def wait_all_done(**context):
     not_finished = df[
         df["WORKFLOW_RUN_ID"].isna()
         | df["WF_END_TIME"].isna()
+        | df["TASK_END_TIME"].isna()
     ]
-    print(f"[INFO] Not finished workflows: {len(not_finished)}")
 
+    print(f"[INFO] Not finished count: {len(not_finished)}")
     if not not_finished.empty:
-        print("[INFO] Some workflows not finished. Waiting...")
+        print("[INFO] Some workflows/tasks not finished. Waiting...")
         return False
 
-    print("[INFO] All workflows finished. Sensor succeeds.")
+    print("[INFO] All workflows and tasks finished. Sensor succeeds.")
     return True
 
 
 def send_status_email(**context):
     today = context["logical_date"].date().isoformat()
     last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] Sending step. today={today}, last_sent={last_sent}")
+    print(f"[INFO] Sending step. today={today} last_sent={last_sent}")
 
     if last_sent == today:
-        print("[INFO] Email already sent for this logical date. Skipping send.")
+        print("[INFO] Email already sent today. Skipping send.")
         return
 
     df = _fetch_df()
     print(f"[INFO] Rows fetched for email: {len(df)}")
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
+
+    # В письме — только workflow (task не выводим)
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
@@ -158,7 +206,7 @@ with DAG(
         python_callable=wait_all_done,
         mode="reschedule",
         poke_interval=900,      # каждые 15 минут
-        timeout=16 * 60 * 60,   # 16 часов (до 00:00 примерно)
+        timeout=16 * 60 * 60,   # до ~00:00
     )
 
     notify = PythonOperator(

@@ -12,11 +12,7 @@ from airflow.models import Variable
 default_args = {
     "owner": "Yestay",
     "email": [
-        "AlmasA@halykbank.kz",
         "EstayA@halykbank.kz",
-        "QuanysQo@halykbank.kz",
-        "AIYGERIMIB@halykbank.kz",
-        "DaniyarMussa@halykbank.kz",
     ],
     "email_on_failure": True,
     "depends_on_past": False,
@@ -59,6 +55,7 @@ last_task_run AS (
         tr.workflow_run_id,
         tr.instance_id,
         tr.instance_name,
+        tr.task_id,
         tr.start_time AS task_start_time,
         tr.end_time   AS task_end_time,
         tr.run_err_code AS task_run_err_code,
@@ -68,7 +65,7 @@ last_task_run AS (
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
     WHERE trunc(tr.start_time) = trunc(sysdate)
-      AND tr.instance_id IN (SELECT task_id FROM need)
+      AND tr.task_id IN (SELECT task_id FROM need)
 )
 SELECT
     w.workflow_name,
@@ -102,7 +99,7 @@ LEFT JOIN ins_rows ir
     ON ir.workflow_run_id = w.workflow_run_id
 LEFT JOIN last_task_run tr
     ON tr.workflow_run_id = w.workflow_run_id
-   AND tr.instance_id = n.task_id
+   AND tr.task_id = n.task_id
    AND tr.rn = 1
 ORDER BY n.workflow_id
 """

@@ -1,1 +1,30 @@
-SELECT gen_random_uuid()::text AS sid
+DELETE FROM pfm.pfm_top1mcg t
+USING (
+  SELECT ctid
+  FROM (
+    SELECT
+      ctid,
+      ROW_NUMBER() OVER (
+        PARTITION BY iin, product_code, period, period_type, upload_date
+        ORDER BY snapshot_date DESC NULLS LAST, priority DESC NULLS LAST, ctid
+      ) AS rn
+    FROM pfm.pfm_top1mcg
+    WHERE upload_date = CURRENT_DATE
+  ) s
+  WHERE s.rn > 1
+) d
+WHERE t.ctid = d.ctid;
+
+
+WITH d AS (
+  SELECT
+    ROW_NUMBER() OVER (
+      PARTITION BY iin, product_code, period, period_type, upload_date
+      ORDER BY snapshot_date DESC NULLS LAST, priority DESC NULLS LAST, ctid
+    ) AS rn
+  FROM pfm.pfm_top1mcg
+  WHERE upload_date = CURRENT_DATE
+)
+SELECT COUNT(*) AS rows_to_delete
+FROM d
+WHERE rn > 1;

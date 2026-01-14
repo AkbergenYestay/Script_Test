@@ -1,230 +1,143 @@
-import datetime
-import pandas as pd
+from datetime import datetime, timedelta
+from textwrap import TextWrapper, dedent
+from typing import Tuple
 
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
+from airflow.operators.python_operator import PythonOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.utils.email import send_email
-from airflow.models import Variable
+
+from source.telegram_topic_notifier import TelegramTopicNotifier
 
 
 default_args = {
-    "owner": "Yestay",
-    "email": [
-        "EstayA@halykbank.kz",
-    ],
-    "email_on_failure": True,
     "depends_on_past": False,
+    "start_date": datetime(2024, 7, 17),
+    "retries": 1,
+    "retry_delay": timedelta(minutes=15),
+    "owner": "AlibekDz",
 }
 
-SQL_MONITOR_WF_TASK_BY_ID = """
-WITH need AS (
-    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
-    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
 
-    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
-    SELECT 8671, 8679 FROM dual UNION ALL
-
-    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
-    SELECT 8690, 8696 FROM dual
-),
-last_wf_run AS (
-    SELECT
-        r.workflow_id,
-        r.workflow_name,
-        r.workflow_run_id,
-        r.start_time AS wf_start_time,
-        r.end_time   AS wf_end_time,
-        r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE trunc(r.start_time) = trunc(sysdate)
-      AND r.workflow_id IN (SELECT workflow_id FROM need)
-),
-ins_rows AS (
-    SELECT
-        s.workflow_run_id,
-        MAX(s.affected_rows) AS inserted_rows
-    FROM RB_REP.OPB_SWIDGINST_LOG s
-    GROUP BY s.workflow_run_id
-),
-last_task_run AS (
-    SELECT
-        tr.workflow_run_id,
-        tr.instance_id,
-        tr.instance_name,
-        tr.task_id,
-        tr.start_time AS task_start_time,
-        tr.end_time   AS task_end_time,
-        tr.run_err_code AS task_run_err_code,
-        ROW_NUMBER() OVER (
-            PARTITION BY tr.workflow_run_id, tr.instance_id
-            ORDER BY tr.start_time DESC
-        ) rn
-    FROM RB_REP.OPB_TASK_INST_RUN tr
-    WHERE trunc(tr.start_time) = trunc(sysdate)
-      AND tr.task_id IN (SELECT task_id FROM need)
-)
-SELECT
-    w.workflow_name,
-    w.workflow_id,
-    w.workflow_run_id,
-    w.wf_start_time,
-    w.wf_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS wf_status,
-    NVL(ir.inserted_rows, 0) AS inserted_rows,
-
-    n.task_id,
-    tr.task_start_time,
-    tr.task_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
-        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
-        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
-        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
-        ELSE 'TASK SUCCESS'
-    END AS task_status
-FROM need n
-LEFT JOIN last_wf_run w
-    ON w.workflow_id = n.workflow_id
-   AND w.rn = 1
-LEFT JOIN ins_rows ir
-    ON ir.workflow_run_id = w.workflow_run_id
-LEFT JOIN last_task_run tr
-    ON tr.workflow_run_id = w.workflow_run_id
-   AND tr.task_id = n.task_id
-   AND tr.rn = 1
-ORDER BY n.workflow_id
-"""
+def format_message(wrapper: TextWrapper, repo_name: str, task_name: str, err_message: str) -> str:
+    err_message = wrapper.fill(dedent(err_message))
+    return f"🛠️ Процесс — <b>{task_name}</b> из репозитория — <b>{repo_name}</b> упал с ошибкой:\n<code>{err_message}</code>"
 
 
-def _fetch_df():
-    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
-    conn = oracle_hook.get_conn()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
-            rows = cursor.fetchall()
-            cols = [c[0] for c in cursor.description]
-    finally:
-        conn.close()
-    return pd.DataFrame(rows, columns=cols)
+def fetch_error_tuples(oracle_hook: OracleHook, sql_statement: str) -> Tuple[str, str, str]:
+    connection = oracle_hook.get_conn()
+    with connection.cursor() as cursor:
+        result_set = cursor.execute(sql_statement).fetchall()
+    connection.close()
+    return result_set
 
 
-def wait_all_done(**context):
-    today = datetime.date.today().isoformat()
-    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] now_date={today} last_sent={last_sent}")
+def check_and_alert(**context):
+    bot_token = context["var"]["value"].get("telegram_bot_token")
+    chat_id = context["var"]["value"].get("new_notifications_chat_id")
+    topic_id = context["var"]["value"].get("topic_id_for_oa_notifications")
+    proxies = {
+        "http": context["var"]["value"].get("http_proxy"),
+        "https": context["var"]["value"].get("https_proxy"),
+    }
 
-    if last_sent == today:
-        print("[INFO] Email already sent today. Sensor succeeds.")
-        return True
+    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
+    wrapper = TextWrapper(width=24, initial_indent="> ", subsequent_indent="> ", max_lines=8, replace_whitespace=True)
 
-    df = _fetch_df()
-    print(f"[INFO] Rows fetched: {len(df)}")
-    if df.empty:
-        print("[INFO] No rows yet. Waiting...")
-        return False
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-        | df["TASK_END_TIME"].isna()
-    ]
-
-    print(f"[INFO] Not finished count: {len(not_finished)}")
-    if not not_finished.empty:
-        print("[INFO] Some workflows/tasks not finished. Waiting...")
-        return False
-
-    has_errors = (
-        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
-        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
+    ipc_errors_fetching_sql = """
+            SELECT 'EDW_IPC' AS task_rep
+            , task_name
+            , RUN_ERR_MSG   as msg
+        FROM edw_ipc.OPB_TASK_INST_RUN
+        WHERE ((to_number(to_char(SYSDATE, 'HH24')) <= 6
+                    AND START_TIME < TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  START_TIME >= TRUNC(SYSDATE))
+                    OR (to_number(to_char(SYSDATE, 'HH24')) > 6
+                    AND START_TIME >= TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  TRUNC(START_TIME) <= TRUNC(SYSDATE)))
+        AND RUN_STATUS_CODE IN (3, 15)
+        UNION
+        SELECT 'ACRM_REP'  AS task_rep
+            , task_name
+            , RUN_ERR_MSG as msg
+        FROM ACRM_REP.OPB_TASK_INST_RUN
+        WHERE ((to_number(to_char(SYSDATE, 'HH24')) <= 6
+                    AND START_TIME < TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  START_TIME >= TRUNC(SYSDATE))
+                    OR (to_number(to_char(SYSDATE, 'HH24')) > 6
+                    AND START_TIME >= TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  TRUNC(START_TIME) <= TRUNC(SYSDATE)))
+        AND RUN_STATUS_CODE IN (3, 15)
+        UNION
+        SELECT 'SB_REP'    AS task_rep
+            , task_name
+            , RUN_ERR_MSG as msg
+        FROM RB_REP.OPB_TASK_INST_RUN
+        WHERE ((to_number(to_char(SYSDATE, 'HH24')) <= 6
+                    AND START_TIME < TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  START_TIME >= TRUNC(SYSDATE))
+                    OR (to_number(to_char(SYSDATE, 'HH24')) > 6
+                    AND START_TIME >= TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND  TRUNC(START_TIME) <= TRUNC(SYSDATE)))
+        AND RUN_STATUS_CODE IN (3, 15)
+        AND WORKFLOW_ID IN (311, 4305, 4426, 4709, 4726)
+        UNION
+        SELECT
+            'REPO_SERVICE' AS task_rep,
+            task_name,
+            RUN_ERR_MSG AS msg
+        FROM
+            REPO_SERVICE.OPB_TASK_INST_RUN
+        WHERE
+            ((to_number(to_char(SYSDATE, 'HH24')) <= 6
+                AND START_TIME < TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                    AND START_TIME >= TRUNC(SYSDATE))
+                OR (to_number(to_char(SYSDATE, 'HH24')) > 6
+                    AND START_TIME >= TRUNC(SYSDATE) + INTERVAL '6' HOUR
+                        AND TRUNC(START_TIME) <= TRUNC(SYSDATE)))
+        AND RUN_STATUS_CODE IN (3, 15)
+        AND WORKFLOW_ID IN (41300)
+    """
+    ipc_errors = fetch_error_tuples(
+        OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True), ipc_errors_fetching_sql
+    )
+    workflow_errors_fetching_sql = """
+            SELECT     WFSTAT.POW_WORKFLOWDEFINITIONNAM AS WF_NAME,
+               REQSTAT.POR_OBJECTNAME AS TASK_NAME,
+               TO_CHAR(REQSTAT.POR_MESSAGE) AS MSG
+    FROM INFA_MRS_MON_HK.PO_REQUESTSTAT REQSTAT
+    LEFT JOIN INFA_MRS_MON_HK.PO_TASKSTAT TASKSTAT ON REQSTAT.POR_PARENTSTATID = TASKSTAT.POT_STATID
+    LEFT JOIN INFA_MRS_MON_HK.PO_WORKFLOWSTAT WFSTAT ON TASKSTAT.POT_PARENTSTATID = WFSTAT.POW_STATID
+    WHERE REQSTAT.POR_SERVICENAME = 'DIS_DEI_PROD_HALYKBANK' 
+           AND WFSTAT.POW_WORKFLOWDEFINITIONNAM IN ('wf_DAILY_LOAD_RISKDM_RSLOAN', 'wf_DAILY_LOAD_RISKDM_CARD', 'wf_DAILY_LOAD_RISKDM_SCORING', 'wf_DAILY_LOAD_RISKDM_DEPOSIT', 'wf_DAILY_LOAD_RISKDM_ONLINE') 
+           AND REQSTAT.POR_STATE = 2
+           AND TO_CHAR(REQSTAT.POR_MESSAGE) != 'No errors encountered.'
+           AND ( (to_number(to_char(SYSDATE, 'HH24')) <= 6
+            AND (TO_DATE('1970-01-01', 'YYYY-MM-DD')+(WFSTAT.POW_STARTTIME / 1000)/(60 * 60 * 24)) < TRUNC(SYSDATE) + INTERVAL '6' HOUR
+            AND  (TO_DATE('1970-01-01', 'YYYY-MM-DD')+(WFSTAT.POW_STARTTIME / 1000)/(60 * 60 * 24)) >= TRUNC(SYSDATE))
+            OR (to_number(to_char(SYSDATE, 'HH24')) > 6
+            AND (TO_DATE('1970-01-01', 'YYYY-MM-DD')+(WFSTAT.POW_STARTTIME / 1000)/(60 * 60 * 24)) >= TRUNC(SYSDATE) + INTERVAL '6' HOUR
+            AND  TRUNC(TO_DATE('1970-01-01', 'YYYY-MM-DD')+(WFSTAT.POW_STARTTIME / 1000)/(60 * 60 * 24)) <= TRUNC(SYSDATE)))
+        """
+    workflow_errors = fetch_error_tuples(
+        OracleHook(oracle_conn_id="ETL_REP", thick_mode=True), workflow_errors_fetching_sql
     )
 
-    if has_errors:
-        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow email send.")
-    else:
-        print("[INFO] All workflows and tasks finished successfully. Sensor succeeds.")
-
-    return True
-
-
-def send_status_email(**context):
-    today = datetime.date.today().isoformat()
-    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] Sending step. now_date={today} last_sent={last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Email already sent today. Skipping send.")
-        return
-
-    df = _fetch_df()
-    print(f"[INFO] Rows fetched for email: {len(df)}")
-    if df.empty:
-        print("[WARN] Empty dataframe; skipping send.")
-        return
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-        | df["TASK_END_TIME"].isna()
-    ]
-    if not not_finished.empty:
-        print("[WARN] Data not finished yet; skipping send.")
-        return
-
-    subject = "PFM account / deposit / openway — статус загрузок"
-    if df["WF_STATUS"].isin(["ERROR/WARNING"]).any() or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any():
-        subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
-
-    lines = [f"<b>Дата:</b> {today}<br><br>"]
-
-    for _, r in df.iterrows():
-        lines.append(
-            f"<b>{r['WORKFLOW_NAME']}</b><br>"
-            f"Старт: {r['WF_START_TIME']}<br>"
-            f"Завершение: {r['WF_END_TIME']}<br>"
-            f"Статус: {r['WF_STATUS']}<br>"
-            f"Количество записей: {int(r['INSERTED_ROWS'])}<br><br>"
-        )
-
-    send_email(
-        to=default_args["email"],
-        subject=subject,
-        html_content="".join(lines),
-    )
-
-    Variable.set("pfm_acc_dep_openway_email_sent", today)
-    print(f"[INFO] Email sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
+    for repo_name, task_name, err_message in ipc_errors + workflow_errors:
+        message = format_message(wrapper, repo_name, task_name, err_message)
+        response = notifier.send_message(message, proxies)
 
 
 with DAG(
-    dag_id="pfm_acc_dep_openway_monitoring_daily",
+    dag_id="O11Y_FETCH_IPC_ERRORS_AND_SEND_NOTIFICATIONS",
     default_args=default_args,
-    start_date=datetime.datetime(2025, 1, 1),
-    schedule="0 8 * * *",
+    schedule="0 6,12 * * *",
     catchup=False,
-    tags=["pfm"],
+    tags=["observability"],
 ) as dag:
-
-    wait = PythonSensor(
-        task_id="wait_all_workflows_done",
-        python_callable=wait_all_done,
-        mode="reschedule",
-        poke_interval=900,
-        timeout=16 * 60 * 60,
+    check_and_alert_task = PythonOperator(
+        task_id="fetch_ipc_errors",
+        python_callable=check_and_alert,
+        dag=dag,
     )
 
-    notify = PythonOperator(
-        task_id="send_email",
-        python_callable=send_status_email,
-    )
-
-    wait >> notify
+check_and_alert_task

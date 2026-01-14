@@ -1,7 +1,8 @@
 # =========================
-# 1) DAG БЕЗ TELEGRAM
+# 2) DAG С TELEGRAM
 # =========================
 import datetime
+from textwrap import TextWrapper, dedent
 
 import pandas as pd
 from airflow import DAG
@@ -10,6 +11,8 @@ from airflow.operators.python import PythonOperator
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.sensors.python import PythonSensor
 from airflow.utils.email import send_email
+
+from source.telegram_topic_notifier import TelegramTopicNotifier
 
 default_args = {
     "owner": "Yestay",
@@ -24,6 +27,7 @@ default_args = {
 
 LOCAL_TZ = "Asia/Almaty"
 SENT_VAR = "pfm_acc_dep_openway_email_sent"
+TG_SENT_VAR = "pfm_acc_dep_openway_tg_sent"
 
 
 SQL_MONITOR_WF_TASK_BY_ID = """
@@ -218,6 +222,65 @@ def send_status_email(**context) -> None:
     print(f"[INFO] Email sent. Variable {SENT_VAR} set to {today}")
 
 
+def send_status_telegram(**context) -> None:
+    today = _today_str(context)
+    last_sent = Variable.get(TG_SENT_VAR, default_var="1970-01-01")
+    print(f"[INFO] Sending telegram step. tz={LOCAL_TZ} today={today} last_sent={last_sent}")
+
+    if last_sent == today:
+        print("[INFO] Telegram already sent today. Skipping send.")
+        return
+
+    df = _fetch_df()
+    print(f"[INFO] Rows fetched for telegram: {len(df)}")
+    if df.empty:
+        print("[WARN] Empty dataframe; skipping telegram.")
+        return
+
+    not_finished = df[
+        df["WORKFLOW_RUN_ID"].isna()
+        | df["WF_END_TIME"].isna()
+        | df["TASK_END_TIME"].isna()
+    ]
+    if not not_finished.empty:
+        print("[WARN] Data not finished yet; skipping telegram.")
+        return
+
+    bot_token = context["var"]["value"].get("telegram_bot_token")
+    chat_id = context["var"]["value"].get("new_notifications_chat_id")
+    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
+    proxies = {
+        "http": context["var"]["value"].get("http_proxy"),
+        "https": context["var"]["value"].get("https_proxy"),
+    }
+
+    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
+    wrapper = TextWrapper(width=24, initial_indent="> ", subsequent_indent="> ", max_lines=20, replace_whitespace=True)
+
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
+    )
+
+    title = "✅ PFM account / deposit / openway — SUCCESS"
+    if has_errors:
+        title = "🛠️ PFM account / deposit / openway — ERROR/WARNING"
+
+    body_lines = [f"Дата: {today}"]
+    for _, r in df.iterrows():
+        body_lines.append(
+            f"{r['WORKFLOW_NAME']} | {r['WF_STATUS']} | rows={_fmt_int(r['INSERTED_ROWS'])} | "
+            f"start={r['WF_START_TIME']} | end={r['WF_END_TIME']}"
+        )
+    body = "\n".join(body_lines)
+
+    message = f"<b>{title}</b>\n" + wrapper.fill(dedent(body))
+    notifier.send_message(message, proxies)
+
+    Variable.set(TG_SENT_VAR, today)
+    print(f"[INFO] Telegram sent. Variable {TG_SENT_VAR} set to {today}")
+
+
 with DAG(
     dag_id="pfm_acc_dep_openway_monitoring_daily",
     default_args=default_args,
@@ -235,9 +298,14 @@ with DAG(
         timeout=16 * 60 * 60,
     )
 
-    notify = PythonOperator(
+    email_task = PythonOperator(
         task_id="send_email",
         python_callable=send_status_email,
     )
 
-    wait >> notify
+    tg_task = PythonOperator(
+        task_id="send_telegram",
+        python_callable=send_status_telegram,
+    )
+
+    wait >> [email_task, tg_task]

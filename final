@@ -34,7 +34,7 @@ def fetch_error_tuples(oracle_hook: OracleHook, sql_statement: str) -> Tuple[str
 def check_and_alert(**context):
     bot_token = context["var"]["value"].get("telegram_bot_token")
     chat_id = context["var"]["value"].get("new_notifications_chat_id")
-    topic_id = context["var"]["value"].get("topic_id_for_oa_notifications")
+    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
     proxies = {
         "http": context["var"]["value"].get("http_proxy"),
         "https": context["var"]["value"].get("https_proxy"),

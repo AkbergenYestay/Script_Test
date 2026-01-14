@@ -1,22 +1,26 @@
 import datetime
+
 import pandas as pd
-
 from airflow import DAG
-from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
-from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.utils.email import send_email
 from airflow.models import Variable
-
+from airflow.operators.python import PythonOperator
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.sensors.python import PythonSensor
+from airflow.utils.email import send_email
 
 default_args = {
     "owner": "Yestay",
     "email": [
-        "EstayA@halykbank.kz", "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
+        "EstayA@halykbank.kz",
+        "AdiletAl@halykbank.kz",
+        "ALMASA@halykbank.kz",
     ],
     "email_on_failure": True,
     "depends_on_past": False,
 }
+
+LOCAL_TZ = "Asia/Almaty"
+SENT_VAR = "pfm_acc_dep_openway_email_sent"
 
 SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
@@ -104,7 +108,11 @@ ORDER BY n.workflow_id
 """
 
 
-def _fetch_df():
+def _today_str(context) -> str:
+    return context["logical_date"].in_timezone(LOCAL_TZ).date().isoformat()
+
+
+def _fetch_df() -> pd.DataFrame:
     oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
     conn = oracle_hook.get_conn()
     try:
@@ -117,10 +125,10 @@ def _fetch_df():
     return pd.DataFrame(rows, columns=cols)
 
 
-def wait_all_done(**context):
-    today = datetime.date.today().isoformat()
-    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] now_date={today} last_sent={last_sent}")
+def wait_all_done(**context) -> bool:
+    today = _today_str(context)
+    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
+    print(f"[INFO] logical_date={context['logical_date']} tz={LOCAL_TZ} today={today} last_sent={last_sent}")
 
     if last_sent == today:
         print("[INFO] Email already sent today. Sensor succeeds.")
@@ -137,8 +145,8 @@ def wait_all_done(**context):
         | df["WF_END_TIME"].isna()
         | df["TASK_END_TIME"].isna()
     ]
-
     print(f"[INFO] Not finished count: {len(not_finished)}")
+
     if not not_finished.empty:
         print("[INFO] Some workflows/tasks not finished. Waiting...")
         return False
@@ -147,19 +155,14 @@ def wait_all_done(**context):
         df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
         or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
     )
-
-    if has_errors:
-        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow email send.")
-    else:
-        print("[INFO] All workflows and tasks finished successfully. Sensor succeeds.")
-
+    print(f"[INFO] All finished. has_errors={has_errors}. Sensor succeeds.")
     return True
 
 
-def send_status_email(**context):
-    today = datetime.date.today().isoformat()
-    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
-    print(f"[INFO] Sending step. now_date={today} last_sent={last_sent}")
+def send_status_email(**context) -> None:
+    today = _today_str(context)
+    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
+    print(f"[INFO] Sending step. tz={LOCAL_TZ} today={today} last_sent={last_sent}")
 
     if last_sent == today:
         print("[INFO] Email already sent today. Skipping send.")
@@ -180,12 +183,16 @@ def send_status_email(**context):
         print("[WARN] Data not finished yet; skipping send.")
         return
 
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
+    )
+
     subject = "PFM account / deposit / openway — статус загрузок"
-    if df["WF_STATUS"].isin(["ERROR/WARNING"]).any() or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any():
+    if has_errors:
         subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
-
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
@@ -201,8 +208,8 @@ def send_status_email(**context):
         html_content="".join(lines),
     )
 
-    Variable.set("pfm_acc_dep_openway_email_sent", today)
-    print(f"[INFO] Email sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
+    Variable.set(SENT_VAR, today)
+    print(f"[INFO] Email sent. Variable {SENT_VAR} set to {today}")
 
 
 with DAG(
@@ -212,8 +219,8 @@ with DAG(
     schedule="0 9 * * *",
     catchup=False,
     tags=["pfm"],
+    max_active_runs=1,
 ) as dag:
-
     wait = PythonSensor(
         task_id="wait_all_workflows_done",
         python_callable=wait_all_done,

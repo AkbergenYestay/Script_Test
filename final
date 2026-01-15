@@ -1,34 +1,22 @@
-# =========================
-# 2) DAG С TELEGRAM
-# =========================
 import datetime
-from textwrap import TextWrapper, dedent
-
 import pandas as pd
-from airflow import DAG
-from airflow.models import Variable
-from airflow.operators.python import PythonOperator
-from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.sensors.python import PythonSensor
-from airflow.utils.email import send_email
 
-from source.telegram_topic_notifier import TelegramTopicNotifier
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.utils.email import send_email
+from airflow.models import Variable
+
 
 default_args = {
     "owner": "Yestay",
     "email": [
-        "EstayA@halykbank.kz",
-        "AdiletAl@halykbank.kz",
-        "ALMASA@halykbank.kz",
+        "EstayA@halykbank.kz", "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
     ],
     "email_on_failure": True,
     "depends_on_past": False,
 }
-
-LOCAL_TZ = "Asia/Almaty"
-SENT_VAR = "pfm_acc_dep_openway_email_sent"
-TG_SENT_VAR = "pfm_acc_dep_openway_tg_sent"
-
 
 SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
@@ -116,18 +104,15 @@ ORDER BY n.workflow_id
 """
 
 
-def _today_str(context) -> str:
-    return context["logical_date"].in_timezone(LOCAL_TZ).date().isoformat()
-
-
-def _fmt_int(n) -> str:
+def _fmt_int_spaces(v) -> str:
+    """1234567 -> '1 234 567' (без падений на None/NaN)"""
     try:
-        return f"{int(n):,}".replace(",", " ")
+        return f"{int(v):,}".replace(",", " ")
     except Exception:
         return "0"
 
 
-def _fetch_df() -> pd.DataFrame:
+def _fetch_df():
     oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
     conn = oracle_hook.get_conn()
     try:
@@ -140,10 +125,10 @@ def _fetch_df() -> pd.DataFrame:
     return pd.DataFrame(rows, columns=cols)
 
 
-def wait_all_done(**context) -> bool:
-    today = _today_str(context)
-    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
-    print(f"[INFO] logical_date={context['logical_date']} tz={LOCAL_TZ} today={today} last_sent={last_sent}")
+def wait_all_done(**context):
+    today = datetime.date.today().isoformat()
+    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
+    print(f"[INFO] now_date={today} last_sent={last_sent}")
 
     if last_sent == today:
         print("[INFO] Email already sent today. Sensor succeeds.")
@@ -160,20 +145,29 @@ def wait_all_done(**context) -> bool:
         | df["WF_END_TIME"].isna()
         | df["TASK_END_TIME"].isna()
     ]
-    print(f"[INFO] Not finished count: {len(not_finished)}")
 
+    print(f"[INFO] Not finished count: {len(not_finished)}")
     if not not_finished.empty:
         print("[INFO] Some workflows/tasks not finished. Waiting...")
         return False
 
-    print("[INFO] All workflows and tasks finished. Sensor succeeds.")
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
+    )
+
+    if has_errors:
+        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow email send.")
+    else:
+        print("[INFO] All workflows and tasks finished successfully. Sensor succeeds.")
+
     return True
 
 
-def send_status_email(**context) -> None:
-    today = _today_str(context)
-    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
-    print(f"[INFO] Sending email step. tz={LOCAL_TZ} today={today} last_sent={last_sent}")
+def send_status_email(**context):
+    today = datetime.date.today().isoformat()
+    last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
+    print(f"[INFO] Sending step. now_date={today} last_sent={last_sent}")
 
     if last_sent == today:
         print("[INFO] Email already sent today. Skipping send.")
@@ -194,22 +188,19 @@ def send_status_email(**context) -> None:
         print("[WARN] Data not finished yet; skipping send.")
         return
 
-    has_errors = (
-        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
-        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
-    )
     subject = "PFM account / deposit / openway — статус загрузок"
-    if has_errors:
+    if df["WF_STATUS"].isin(["ERROR/WARNING"]).any() or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any():
         subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
+
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
             f"Старт: {r['WF_START_TIME']}<br>"
             f"Завершение: {r['WF_END_TIME']}<br>"
             f"Статус: {r['WF_STATUS']}<br>"
-            f"Количество записей: {_fmt_int(r['INSERTED_ROWS'])}<br><br>"
+            f"Количество записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}<br><br>"
         )
 
     send_email(
@@ -218,67 +209,8 @@ def send_status_email(**context) -> None:
         html_content="".join(lines),
     )
 
-    Variable.set(SENT_VAR, today)
-    print(f"[INFO] Email sent. Variable {SENT_VAR} set to {today}")
-
-
-def send_status_telegram(**context) -> None:
-    today = _today_str(context)
-    last_sent = Variable.get(TG_SENT_VAR, default_var="1970-01-01")
-    print(f"[INFO] Sending telegram step. tz={LOCAL_TZ} today={today} last_sent={last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Telegram already sent today. Skipping send.")
-        return
-
-    df = _fetch_df()
-    print(f"[INFO] Rows fetched for telegram: {len(df)}")
-    if df.empty:
-        print("[WARN] Empty dataframe; skipping telegram.")
-        return
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-        | df["TASK_END_TIME"].isna()
-    ]
-    if not not_finished.empty:
-        print("[WARN] Data not finished yet; skipping telegram.")
-        return
-
-    bot_token = context["var"]["value"].get("telegram_bot_token")
-    chat_id = context["var"]["value"].get("new_notifications_chat_id")
-    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
-    proxies = {
-        "http": context["var"]["value"].get("http_proxy"),
-        "https": context["var"]["value"].get("https_proxy"),
-    }
-
-    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
-    wrapper = TextWrapper(width=24, initial_indent="> ", subsequent_indent="> ", max_lines=20, replace_whitespace=True)
-
-    has_errors = (
-        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
-        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
-    )
-
-    title = "✅ PFM account / deposit / openway — SUCCESS"
-    if has_errors:
-        title = "🛠️ PFM account / deposit / openway — ERROR/WARNING"
-
-    body_lines = [f"Дата: {today}"]
-    for _, r in df.iterrows():
-        body_lines.append(
-            f"{r['WORKFLOW_NAME']} | {r['WF_STATUS']} | rows={_fmt_int(r['INSERTED_ROWS'])} | "
-            f"start={r['WF_START_TIME']} | end={r['WF_END_TIME']}"
-        )
-    body = "\n".join(body_lines)
-
-    message = f"<b>{title}</b>\n" + wrapper.fill(dedent(body))
-    notifier.send_message(message, proxies)
-
-    Variable.set(TG_SENT_VAR, today)
-    print(f"[INFO] Telegram sent. Variable {TG_SENT_VAR} set to {today}")
+    Variable.set("pfm_acc_dep_openway_email_sent", today)
+    print(f"[INFO] Email sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
 
 
 with DAG(
@@ -288,8 +220,9 @@ with DAG(
     schedule="0 9 * * *",
     catchup=False,
     tags=["pfm"],
-    max_active_runs=1,
+    max_active_runs=1,   # ✅ важно
 ) as dag:
+
     wait = PythonSensor(
         task_id="wait_all_workflows_done",
         python_callable=wait_all_done,
@@ -298,14 +231,9 @@ with DAG(
         timeout=16 * 60 * 60,
     )
 
-    email_task = PythonOperator(
+    notify = PythonOperator(
         task_id="send_email",
         python_callable=send_status_email,
     )
 
-    tg_task = PythonOperator(
-        task_id="send_telegram",
-        python_callable=send_status_telegram,
-    )
-
-    wait >> [email_task, tg_task]
+    wait >> notify

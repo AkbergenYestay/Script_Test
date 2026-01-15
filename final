@@ -1,5 +1,6 @@
 import datetime
 import pandas as pd
+from textwrap import TextWrapper
 
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -7,6 +8,8 @@ from airflow.sensors.python import PythonSensor
 from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.utils.email import send_email
 from airflow.models import Variable
+
+from source.telegram_topic_notifier import TelegramTopicNotifier
 
 
 default_args = {
@@ -105,7 +108,6 @@ ORDER BY n.workflow_id
 
 
 def _fmt_int_spaces(v) -> str:
-    """1234567 -> '1 234 567' (без падений на None/NaN)"""
     try:
         return f"{int(v):,}".replace(",", " ")
     except Exception:
@@ -157,24 +159,62 @@ def wait_all_done(**context):
     )
 
     if has_errors:
-        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow email send.")
+        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow notifications.")
     else:
         print("[INFO] All workflows and tasks finished successfully. Sensor succeeds.")
 
     return True
 
 
-def send_status_email(**context):
+def _send_telegram(df: pd.DataFrame, today: str, has_errors: bool, **context) -> None:
+    bot_token = context["var"]["value"].get("telegram_bot_token")
+    chat_id = context["var"]["value"].get("new_notifications_chat_id")
+    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
+    proxies = {
+        "http": context["var"]["value"].get("http_proxy"),
+        "https": context["var"]["value"].get("https_proxy"),
+    }
+
+    if not bot_token or not chat_id or not topic_id:
+        print("[WARN] Telegram vars are not set полностью (bot_token/chat_id/topic_id). Skipping telegram.")
+        return
+
+    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
+
+    header = "✅ PFM account/deposit/openway — статус загрузок"
+    if has_errors:
+        header = "❌ PFM account/deposit/openway — ОШИБКА в загрузках"
+
+    wrapper = TextWrapper(width=70, replace_whitespace=True)
+
+    parts = [f"{header}\n<b>Дата:</b> {today}\n"]
+    for _, r in df.iterrows():
+        txt = (
+            f"• <b>{r['WORKFLOW_NAME']}</b>\n"
+            f"  Старт: {r['WF_START_TIME']}\n"
+            f"  Завершение: {r['WF_END_TIME']}\n"
+            f"  Статус: {r['WF_STATUS']}\n"
+            f"  Кол-во записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}\n"
+        )
+        parts.append(wrapper.fill(txt))
+
+    message = "\n".join(parts)
+    print("[INFO] Sending telegram message...")
+    notifier.send_message(message, proxies)
+    print("[INFO] Telegram sent.")
+
+
+def send_status_notifications(**context):
     today = datetime.date.today().isoformat()
     last_sent = Variable.get("pfm_acc_dep_openway_email_sent", default_var="1970-01-01")
     print(f"[INFO] Sending step. now_date={today} last_sent={last_sent}")
 
     if last_sent == today:
-        print("[INFO] Email already sent today. Skipping send.")
+        print("[INFO] Notifications already sent today. Skipping.")
         return
 
     df = _fetch_df()
-    print(f"[INFO] Rows fetched for email: {len(df)}")
+    print(f"[INFO] Rows fetched for notifications: {len(df)}")
     if df.empty:
         print("[WARN] Empty dataframe; skipping send.")
         return
@@ -188,12 +228,17 @@ def send_status_email(**context):
         print("[WARN] Data not finished yet; skipping send.")
         return
 
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
+    )
+
+    # EMAIL
     subject = "PFM account / deposit / openway — статус загрузок"
-    if df["WF_STATUS"].isin(["ERROR/WARNING"]).any() or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any():
+    if has_errors:
         subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
-
     for _, r in df.iterrows():
         lines.append(
             f"<b>{r['WORKFLOW_NAME']}</b><br>"
@@ -203,14 +248,19 @@ def send_status_email(**context):
             f"Количество записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}<br><br>"
         )
 
+    print("[INFO] Sending email...")
     send_email(
         to=default_args["email"],
         subject=subject,
         html_content="".join(lines),
     )
+    print("[INFO] Email sent.")
+
+    # TELEGRAM
+    _send_telegram(df=df, today=today, has_errors=has_errors, **context)
 
     Variable.set("pfm_acc_dep_openway_email_sent", today)
-    print(f"[INFO] Email sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
+    print(f"[INFO] Notifications sent. Variable pfm_acc_dep_openway_email_sent set to {today}")
 
 
 with DAG(
@@ -232,8 +282,8 @@ with DAG(
     )
 
     notify = PythonOperator(
-        task_id="send_email",
-        python_callable=send_status_email,
+        task_id="send_notifications",
+        python_callable=send_status_notifications,
     )
 
     wait >> notify

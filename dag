@@ -1,28 +1,3 @@
-import datetime
-
-import pandas as pd
-from airflow import DAG
-from airflow.models import Variable
-from airflow.operators.python import PythonOperator
-from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.sensors.python import PythonSensor
-from airflow.utils.email import send_email
-
-default_args = {
-    "owner": "Yestay",
-    "email": [
-        "EstayA@halykbank.kz",
-        "AdiletAl@halykbank.kz",
-        "ALMASA@halykbank.kz",
-    ],
-    "email_on_failure": True,
-    "depends_on_past": False,
-}
-
-LOCAL_TZ = "Asia/Almaty"
-SENT_VAR = "pfm_acc_dep_openway_email_sent"
-
-SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
     -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
     SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
@@ -43,7 +18,7 @@ last_wf_run AS (
         r.run_err_code,
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE trunc(r.start_time) = trunc(sysdate)
+    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
       AND r.workflow_id IN (SELECT workflow_id FROM need)
 ),
 ins_rows AS (
@@ -60,14 +35,22 @@ last_task_run AS (
         tr.instance_name,
         tr.task_id,
         tr.start_time AS task_start_time,
-        tr.end_time   AS task_end_time,
+
+        /* FIX: end_time sometimes contains a "future/huge" placeholder -> treat as not finished */
+        CASE
+            WHEN tr.end_time IS NULL THEN NULL
+            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
+            WHEN tr.end_time > SYSDATE THEN NULL
+            ELSE tr.end_time
+        END AS task_end_time,
+
         tr.run_err_code AS task_run_err_code,
         ROW_NUMBER() OVER (
             PARTITION BY tr.workflow_run_id, tr.instance_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
-    WHERE trunc(tr.start_time) = trunc(sysdate)
+    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
       AND tr.task_id IN (SELECT task_id FROM need)
 )
 SELECT
@@ -104,134 +87,4 @@ LEFT JOIN last_task_run tr
     ON tr.workflow_run_id = w.workflow_run_id
    AND tr.task_id = n.task_id
    AND tr.rn = 1
-ORDER BY n.workflow_id
-"""
-
-
-def _today_str(context) -> str:
-    return context["logical_date"].in_timezone(LOCAL_TZ).date().isoformat()
-
-
-def _fetch_df() -> pd.DataFrame:
-    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
-    conn = oracle_hook.get_conn()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
-            rows = cursor.fetchall()
-            cols = [c[0] for c in cursor.description]
-    finally:
-        conn.close()
-    return pd.DataFrame(rows, columns=cols)
-
-
-def wait_all_done(**context) -> bool:
-    today = _today_str(context)
-    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
-    print(f"[INFO] logical_date={context['logical_date']} tz={LOCAL_TZ} today={today} last_sent={last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Email already sent today. Sensor succeeds.")
-        return True
-
-    df = _fetch_df()
-    print(f"[INFO] Rows fetched: {len(df)}")
-    if df.empty:
-        print("[INFO] No rows yet. Waiting...")
-        return False
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-        | df["TASK_END_TIME"].isna()
-    ]
-    print(f"[INFO] Not finished count: {len(not_finished)}")
-
-    if not not_finished.empty:
-        print("[INFO] Some workflows/tasks not finished. Waiting...")
-        return False
-
-    has_errors = (
-        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
-        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
-    )
-    print(f"[INFO] All finished. has_errors={has_errors}. Sensor succeeds.")
-    return True
-
-
-def send_status_email(**context) -> None:
-    today = _today_str(context)
-    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
-    print(f"[INFO] Sending step. tz={LOCAL_TZ} today={today} last_sent={last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Email already sent today. Skipping send.")
-        return
-
-    df = _fetch_df()
-    print(f"[INFO] Rows fetched for email: {len(df)}")
-    if df.empty:
-        print("[WARN] Empty dataframe; skipping send.")
-        return
-
-    not_finished = df[
-        df["WORKFLOW_RUN_ID"].isna()
-        | df["WF_END_TIME"].isna()
-        | df["TASK_END_TIME"].isna()
-    ]
-    if not not_finished.empty:
-        print("[WARN] Data not finished yet; skipping send.")
-        return
-
-    has_errors = (
-        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
-        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
-    )
-
-    subject = "PFM account / deposit / openway — статус загрузок"
-    if has_errors:
-        subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
-
-    lines = [f"<b>Дата:</b> {today}<br><br>"]
-    for _, r in df.iterrows():
-        lines.append(
-            f"<b>{r['WORKFLOW_NAME']}</b><br>"
-            f"Старт: {r['WF_START_TIME']}<br>"
-            f"Завершение: {r['WF_END_TIME']}<br>"
-            f"Статус: {r['WF_STATUS']}<br>"
-            f"Количество записей: {int(r['INSERTED_ROWS'])}<br><br>"
-        )
-
-    send_email(
-        to=default_args["email"],
-        subject=subject,
-        html_content="".join(lines),
-    )
-
-    Variable.set(SENT_VAR, today)
-    print(f"[INFO] Email sent. Variable {SENT_VAR} set to {today}")
-
-
-with DAG(
-    dag_id="pfm_acc_dep_openway_monitoring_daily",
-    default_args=default_args,
-    start_date=datetime.datetime(2025, 1, 1),
-    schedule="0 9 * * *",
-    catchup=False,
-    tags=["pfm"],
-    max_active_runs=1,
-) as dag:
-    wait = PythonSensor(
-        task_id="wait_all_workflows_done",
-        python_callable=wait_all_done,
-        mode="reschedule",
-        poke_interval=900,
-        timeout=16 * 60 * 60,
-    )
-
-    notify = PythonOperator(
-        task_id="send_email",
-        python_callable=send_status_email,
-    )
-
-    wait >> notify
+ORDER BY n.workflow_id;

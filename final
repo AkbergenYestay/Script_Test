@@ -15,7 +15,7 @@ from source.telegram_topic_notifier import TelegramTopicNotifier
 default_args = {
     "owner": "Yestay",
     "email": [
-        "EstayA@halykbank.kz", "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
+        "EstayA@halykbank.kz", #"AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
     ],
     "email_on_failure": True,
     "depends_on_past": False,
@@ -42,7 +42,7 @@ last_wf_run AS (
         r.run_err_code,
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE trunc(r.start_time) = trunc(sysdate)
+    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
       AND r.workflow_id IN (SELECT workflow_id FROM need)
 ),
 ins_rows AS (
@@ -59,14 +59,21 @@ last_task_run AS (
         tr.instance_name,
         tr.task_id,
         tr.start_time AS task_start_time,
-        tr.end_time   AS task_end_time,
+
+        CASE
+            WHEN tr.end_time IS NULL THEN NULL
+            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
+            WHEN tr.end_time > SYSDATE THEN NULL
+            ELSE tr.end_time
+        END AS task_end_time,
+
         tr.run_err_code AS task_run_err_code,
         ROW_NUMBER() OVER (
             PARTITION BY tr.workflow_run_id, tr.instance_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
-    WHERE trunc(tr.start_time) = trunc(sysdate)
+    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
       AND tr.task_id IN (SELECT task_id FROM need)
 )
 SELECT
@@ -170,35 +177,42 @@ def _send_telegram(df: pd.DataFrame, today: str, has_errors: bool, **context) ->
     bot_token = context["var"]["value"].get("telegram_bot_token")
     chat_id = context["var"]["value"].get("new_notifications_chat_id")
     topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
+    
     proxies = {
         "http": context["var"]["value"].get("http_proxy"),
         "https": context["var"]["value"].get("https_proxy"),
     }
 
     if not bot_token or not chat_id or not topic_id:
-        print("[WARN] Telegram vars are not set полностью (bot_token/chat_id/topic_id). Skipping telegram.")
+        print("[WARN] Telegram vars are not set fully. Skipping telegram.")
         return
 
     notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
 
-    header = "✅ PFM account/deposit/openway — статус загрузок"
+    header = "✅ <b>PFM account/deposit/openway</b> — статус загрузок"
     if has_errors:
-        header = "❌ PFM account/deposit/openway — ОШИБКА в загрузках"
+        header = "❌ <b>PFM account/deposit/openway</b> — ОШИБКА в загрузках"
 
     wrapper = TextWrapper(width=70, replace_whitespace=True)
 
-    parts = [f"{header}\n<b>Дата:</b> {today}\n"]
-    for _, r in df.iterrows():
-        txt = (
-            f"• <b>{r['WORKFLOW_NAME']}</b>\n"
-            f"  Старт: {r['WF_START_TIME']}\n"
-            f"  Завершение: {r['WF_END_TIME']}\n"
-            f"  Статус: {r['WF_STATUS']}\n"
-            f"  Кол-во записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}\n"
-        )
-        parts.append(wrapper.fill(txt))
+    parts = [
+        f"{header}<br><br>"
+        f"<b>Дата:</b> {today}<br><br>"
+    ]
 
-    message = "\n".join(parts)
+    for _, r in df.iterrows():
+        rows_fmt = f"{int(r['INSERTED_ROWS']):,}".replace(",", " ")
+
+        parts.append(
+            f"• <b>{r['WORKFLOW_NAME']}</b><br>"
+            f"Старт: {r['WF_START_TIME']}<br>"
+            f"Завершение: {r['WF_END_TIME']}<br>"
+            f"Статус: <b>{r['WF_STATUS']}</b><br>"
+            f"Кол-во записей: <b>{rows_fmt}</b><br><br>"
+        )
+
+    message = "".join(parts)
+
     print("[INFO] Sending telegram message...")
     notifier.send_message(message, proxies)
     print("[INFO] Telegram sent.")
@@ -234,9 +248,9 @@ def send_status_notifications(**context):
     )
 
     # EMAIL
-    subject = "PFM account / deposit / openway — статус загрузок"
+    subject = "✅ PFM account / deposit / openway — статус загрузок"
     if has_errors:
-        subject = "PFM account / deposit / openway — ОШИБКА в загрузках"
+        subject = "❌ PFM account / deposit / openway — ОШИБКА в загрузках"
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
     for _, r in df.iterrows():
@@ -264,13 +278,13 @@ def send_status_notifications(**context):
 
 
 with DAG(
-    dag_id="pfm_acc_dep_openway_monitoring_daily",
+    dag_id="pfm_acc_dep_openway_send_notifications",
     default_args=default_args,
     start_date=datetime.datetime(2025, 1, 1),
     schedule="0 9 * * *",
     catchup=False,
     tags=["pfm"],
-    max_active_runs=1,   # ✅ важно
+    max_active_runs=1,
 ) as dag:
 
     wait = PythonSensor(

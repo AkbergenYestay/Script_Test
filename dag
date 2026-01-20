@@ -1,311 +1,321 @@
-import json
-from typing import List
-
+import datetime
 import pandas as pd
-import pendulum
-import requests
-from airflow.decorators import dag, task
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
 from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.providers.vertica.hooks.vertica import VerticaHook
+from airflow.utils.email import send_email
+from airflow.models import Variable
 
-from source.telegram_notifications import (
-    TelegramErrorNotification,
-)
 from source.telegram_topic_notifier import TelegramTopicNotifier
+from source.telegram_notifications import TelegramErrorNotification
 
 
-@dag(
-    default_args={
-        "owner": "TleuserIz",
-    },
-    dag_id="O11Y_DEPENDENCIES_READINESS_NOTIFIER",
-    schedule="0 12,16 * * *",
-    start_date=pendulum.datetime(2024, 9, 2, tz="Asia/Oral"),
-    catchup=False,
-    tags=["o11y"],
+default_args = {
+    "owner": "Yestay",
+    "email": [
+        "EstayA@halykbank.kz",  # "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
+    ],
+    "email_on_failure": True,
+    "depends_on_past": False,
+}
+
+SENT_VAR = "top_pfm_email_sent"
+
+SQL_MONITOR_WF_TASK_BY_ID = """
+WITH need AS (
+    -- wf_w4_pfm_top1mcg -> s_m_w4_pfm_top1mcg
+    SELECT 7387 AS workflow_id, 7389 AS task_id FROM dual UNION ALL
+
+    -- wf_w4_pfm_top3_transactions -> s_m_w4_pfm_top3_transactions
+    SELECT 7468, 7470 FROM dual UNION ALL
+
+    -- wf_w4_pfm_top3_merchants -> s_m_w4_pfm_top3_merchants
+    SELECT 7427, 7429 FROM dual UNION ALL
+    
+    -- wf_w4_pfm_treat_yourself -> s_m_w4_pfm_treat_yourself
+    SELECT 7418, 7421 FROM dual
+),
+last_wf_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time AS wf_start_time,
+        r.end_time   AS wf_end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
+      AND r.workflow_id IN (SELECT workflow_id FROM need)
+),
+ins_rows AS (
+    SELECT
+        s.workflow_run_id,
+        MAX(s.affected_rows) AS inserted_rows
+    FROM RB_REP.OPB_SWIDGINST_LOG s
+    GROUP BY s.workflow_run_id
+),
+last_task_run AS (
+    SELECT
+        tr.workflow_run_id,
+        tr.instance_id,
+        tr.instance_name,
+        tr.task_id,
+        tr.start_time AS task_start_time,
+
+        CASE
+            WHEN tr.end_time IS NULL THEN NULL
+            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
+            WHEN tr.end_time > SYSDATE THEN NULL
+            ELSE tr.end_time
+        END AS task_end_time,
+
+        tr.run_err_code AS task_run_err_code,
+        ROW_NUMBER() OVER (
+            PARTITION BY tr.workflow_run_id, tr.instance_id
+            ORDER BY tr.start_time DESC
+        ) rn
+    FROM RB_REP.OPB_TASK_INST_RUN tr
+    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
+      AND tr.task_id IN (SELECT task_id FROM need)
 )
-def taskflow():
-    vertica_hook = VerticaHook("Vertica_Prod")
-    oracle_hook = OracleHook(oracle_conn_id="EDW_ETL_CDO", thick_mode=True)
+SELECT
+    w.workflow_name,
+    w.workflow_id,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
+        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END AS wf_status,
+    NVL(ir.inserted_rows, 0) AS inserted_rows,
 
-    requirements: str = """
-    plottable
-    matplotlib
-    pandas
-    """
-    # directory = Variable.get("root_dir")
-    directory = "/opt/airflow/temp/"
+    n.task_id,
+    tr.task_start_time,
+    tr.task_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
+        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
+        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+        ELSE 'TASK SUCCESS'
+    END AS task_status
+FROM need n
+LEFT JOIN last_wf_run w
+    ON w.workflow_id = n.workflow_id
+   AND w.rn = 1
+LEFT JOIN ins_rows ir
+    ON ir.workflow_run_id = w.workflow_run_id
+LEFT JOIN last_task_run tr
+    ON tr.workflow_run_id = w.workflow_run_id
+   AND tr.task_id = n.task_id
+   AND tr.rn = 1
+ORDER BY n.workflow_id
+"""
 
-    @task(
-        task_id="read_profile_readiness_vertica_table_to_dataframe",
-        on_failure_callback=[TelegramErrorNotification()],
+
+def _fmt_int_spaces(v) -> str:
+    try:
+        return f"{int(v):,}".replace(",", " ")
+    except Exception:
+        return "0"
+
+
+def _fetch_df() -> pd.DataFrame:
+    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
+    conn = oracle_hook.get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
+            rows = cursor.fetchall()
+            cols = [c[0] for c in cursor.description]
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def wait_all_done(**context) -> bool:
+    today = datetime.date.today().isoformat()
+    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
+    print(f"[INFO] now_date={today} last_sent={last_sent}")
+
+    if last_sent == today:
+        print("[INFO] Notifications already sent today. Sensor succeeds.")
+        return True
+
+    df = _fetch_df()
+    print(f"[INFO] Rows fetched: {len(df)}")
+    if df.empty:
+        print("[INFO] No rows yet. Waiting...")
+        return False
+
+    not_finished = df[
+        df["WORKFLOW_RUN_ID"].isna()
+        | df["WF_END_TIME"].isna()
+        | df["TASK_END_TIME"].isna()
+    ]
+    print(f"[INFO] Not finished count: {len(not_finished)}")
+
+    if not not_finished.empty:
+        print("[INFO] Some workflows/tasks not finished. Waiting...")
+        return False
+
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
     )
-    def fetch_mdm_profile_dependencies_df(vertica_hook: VerticaHook) -> pd.DataFrame:
-        vertica_conn = vertica_hook.get_conn()
-        statement = """
-        SELECT to_char(OPER_DATE), PRIORITY, DEPEND_READY, PROC_RUNNING, PROC_ERROR, PROC_READY, TOTAL
-from (
 
-       SELECT pl.*
-                    , p.PRIORITY
-                    , sum(case when pl.DEPEND_READY_FL = 1 then 1 else 0 end) over(partition by p.PRIORITY) as DEPEND_READY
-                    , sum(case when pl.PROC_READY_FL = 1 then 1 else 0 end) over(partition by p.PRIORITY) as PROC_READY
-                    , sum(case when pl.PROC_READY_FL = 2 then 1 else 0 end) over(partition by p.PRIORITY) as PROC_RUNNING
-                    , sum(case when pl.PROC_READY_FL = 3 then 1 else 0 end) over(partition by p.PRIORITY) as PROC_ERROR
-                    , count(p.PRIORITY) over(partition by p.PRIORITY) as TOTAL
-             from mdm_tech.profile_log pl
-             left join (
-                    SELECT DISTINCT VRT_TABLE_NAME, PRIORITY
-                    from mdm_tech.profile_relation
-             ) p on lower(p.VRT_TABLE_NAME) = lower(pl.VRT_TABLE_NAME)
-             where OPER_DATE = (SELECT max(OPER_DATE) from mdm_tech.profile_log) - 0 --date '2024-03-24'
-             order by OPER_DATE, PRIORITY, VRT_TABLE_NAME
+    if has_errors:
+        print("[INFO] All finished but there are ERROR/WARNING statuses. Sensor succeeds to allow notifications.")
+    else:
+        print("[INFO] All workflows and tasks finished successfully. Sensor succeeds.")
 
-       ) t
-group by OPER_DATE, PRIORITY, DEPEND_READY, PROC_READY, PROC_RUNNING, PROC_ERROR, TOTAL
-order by PRIORITY;
-        """
-        with vertica_conn.cursor("dict") as cursor:
-            result_set = cursor.execute(statement).fetchall()
-            df = pd.read_json(json.dumps(result_set), orient="records")
+    return True
 
-        vertica_conn.close()
-        return df
 
-    @task(
-        task_id="read_dm_readiness_oracle_table_to_dataframe",
-        on_failure_callback=[TelegramErrorNotification()],
-    )
-    def fetch_dm_readiness_df(oracle_hook: OracleHook) -> pd.DataFrame:
-        oracle_conn = oracle_hook.get_conn()
-        statement = """
-        SELECT table_name,
-       '-' || delay_days                                 AS delay_days,
-       to_char(trunc(sysdate) - delay_days, 'YYYY-MM-DD') AS last_actual_date
-FROM (SELECT SUBSTR(dst.WF_NAME, 4, 200) AS table_name
-           , trunc(sysdate) - DATE_VALUE AS delay_days
-           , ROW_NUMBER()                   OVER(PARTITION BY wf_name ORDER BY DATE_VALUE DESC) rn
-      FROM PREDDS.DM_SHED_TABLE dst) f
-WHERE rn = 1
-  AND delay_days != 1
-order by table_name, delay_days
-        """
-        with oracle_conn.cursor() as cursor:
-            cursor = cursor.execute(statement)
-            columns = [col[0] for col in cursor.description]
-            cursor.rowfactory = lambda *args: dict(zip(columns, args))
-            result_set = cursor.fetchall()
-            df = pd.read_json(json.dumps(result_set))
-        oracle_conn.close()
-        return df
+def _send_telegram_status(df: pd.DataFrame, today: str, has_errors: bool, **context) -> None:
+    bot_token = context["var"]["value"].get("telegram_bot_token")
+    chat_id = context["var"]["value"].get("new_notifications_chat_id")
+    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
+    http_proxy = context["var"]["value"].get("http_proxy")
+    https_proxy = context["var"]["value"].get("https_proxy")
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
 
-    @task.external_python(
-        task_id="run_script_in_env",
-        # requirements=requirements,
-        # python_version=None,
-        # serializer=None,
-        # system_site_packages=False,
-        # pip_install_options=[
-        #     "--no-cache-dir",
-        #     # "-vvv",
-        #     "--index-url",
-        #     "https://nexus.halykbank.nb/repository/di-group-pypi/simple",
-        #     "--trusted-host",
-        #     "nexus.halykbank.nb",
-        # ],
-        # op_args=None,
-        # op_kwargs=None,
-        # string_args=None,
-        # expect_airflow=False,
-        # venv_cache_path="/opt/airflow/venv_cache/",
-        python="/opt/airflow/venvs/.venv/bin/python3",
-        on_failure_callback=[TelegramErrorNotification()],
-    )
-    def render_images(dfs, directory: str):  # Add a typing hint after bumping Airflow version
-        import datetime as dt
-        import typing
-        from pathlib import Path
+    print(f"[INFO] TG vars: bot={'YES' if bot_token else 'NO'} chat_id={chat_id} topic_id={topic_id}")
+    print(f"[INFO] TG proxies: {proxies if proxies else 'NO'}")
 
-        import matplotlib.pyplot as plt
-        import pandas as pd
-        from plottable import ColumnDefinition, Table
+    if not bot_token or not chat_id or not topic_id:
+        print("[WARN] Telegram vars are not set fully (bot_token/chat_id/topic_id). Skipping telegram.")
+        return
 
-        mdm_profile_dependencies_readiness_df, dm_readiness_df = dfs[0], dfs[1]
-        # dm_readiness_df may contain zero rows — when all tables are ready; usually, in the beginning of a month
+    try:
+        topic_id = int(topic_id)  # важно: message_thread_id должен быть int
+    except Exception as e:
+        print(f"[ERROR] topic_id must be int, got={topic_id}. Error: {e}")
+        return
 
-        def appropriate_fig_size(n_records: int) -> typing.Tuple[int, int]:
-            if n_records <= 2:
-                return 16, 8
-            elif 2 < n_records <= 10:
-                return 17, 10
-            else:
-                return 17, 17
+    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
 
-        def render_mdm_profile_dependencies_readiness_table(df, directory):
-            colnames = [
-                "Опер. День",
-                "Приоритет",
-                "Готовые Зависимости",
-                "В Процессе",
-                "С Ошибкой",
-                "Завершённые",
-                "Всего",
-            ]
-            columns = df.columns.tolist()
-            col_to_name = dict(zip(columns, colnames))
-            df = df.rename(col_to_name, axis=1)
-            col_defs = [
-                ColumnDefinition(
-                    name="Опер. День",
-                    textprops={"ha": "center", "weight": "heavy"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Приоритет",
-                    textprops={"ha": "center"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Готовые Зависимости",
-                    textprops={"ha": "center"},
-                    width=2.3,
-                ),
-                ColumnDefinition(
-                    name="В Процессе",
-                    textprops={"ha": "center"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="С Ошибкой",
-                    textprops={"ha": "center"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Завершённые",
-                    textprops={"ha": "center"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Всего",
-                    textprops={"ha": "center", "fontstyle": "italic"},
-                    width=1.5,
-                ),
-            ]
+    header = "✅ <b>Витрины для баннеров по PFM (каждый вторник)"
+    if has_errors:
+        header = "❌ <b>Витрины для баннеров по PFM (каждый вторник)</b>"
 
-            plt.rcParams["font.family"] = ["DejaVu Sans"]
-            plt.rcParams["savefig.bbox"] = "tight"
-            fig, ax = plt.subplots(figsize=(17, 10))
-            tab = Table(
-                df,
-                column_definitions=col_defs,
-                index_col="Опер. День",
-                row_dividers=True,
-                footer_divider=True,
-                ax=ax,
-                textprops={"fontsize": 16},
-                row_divider_kw={"linewidth": 1, "linestyle": (0, (1, 5))},
-                # col_label_divider_kw={"linewidth": 1, "linestyle": "-"},
-                # col_label_divider=True,
-                # column_border_kw={"linewidth": 1, "linestyle": (0, (1, 5))},
-            )
-            path = Path(directory)
-            filepath = path / f"{dt.datetime.now().strftime('%F_%H-%M-%S')}_mdm_profile_dependencies.png"  # In utc
-            plt.savefig(filepath)
-            return filepath.as_posix()
+    parts = [f"{header}\n<b>Дата:</b> {today}\n\n"]
 
-        def render_dm_readiness_table(df, directory):
-            if df.empty:
-                cols = ("TABLE_NAME", "DELAY_DAYS", "LAST_ACTUAL_DATE")
-                df = pd.concat([df, pd.DataFrame(data=[["-", "-", "-"]], columns=cols)], ignore_index=True)
-            colnames = [
-                "Название Таблицы",
-                "Задержка (в днях)",
-                "Последняя Актуальная Дата",
-            ]
-            columns = df.columns.tolist()
-            col_to_name = dict(zip(columns, colnames))
-            df = df.rename(col_to_name, axis=1)
-            col_defs = [
-                ColumnDefinition(
-                    name="Название Таблицы",
-                    textprops={"ha": "left", "weight": "heavy"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Задержка (в днях)",
-                    textprops={"ha": "center", "fontstyle": "italic"},
-                    width=1.5,
-                ),
-                ColumnDefinition(
-                    name="Последняя Актуальная Дата",
-                    textprops={"ha": "center"},
-                    width=2.3,
-                ),
-            ]
-
-            plt.rcParams["font.family"] = ["DejaVu Sans"]
-            plt.rcParams["savefig.bbox"] = "tight"
-            fig, ax = plt.subplots(figsize=appropriate_fig_size(len(df)))
-            tab = Table(
-                df,
-                column_definitions=col_defs,
-                index_col="Название Таблицы",
-                row_dividers=True,
-                footer_divider=True,
-                ax=ax,
-                textprops={"fontsize": 14},
-                row_divider_kw={"linewidth": 1, "linestyle": (0, (1, 5))},
-                # col_label_divider_kw={"linewidth": 1, "linestyle": "-"},
-                # col_label_divider=True,
-                # column_border_kw={"linewidth": 1, "linestyle": (0, (1, 5))},
-            )
-            path = Path(directory)
-            filepath = path / f"{dt.datetime.now().strftime('%F_%H-%M-%S')}_dm_readiness.png"  # In utc
-            plt.savefig(filepath)
-            return filepath.as_posix()
-
-        # if not mdm_profile_dependencies_readiness_df.empty:
-        file_paths = [
-            render_mdm_profile_dependencies_readiness_table(mdm_profile_dependencies_readiness_df, directory),
-            render_dm_readiness_table(dm_readiness_df, directory),
-        ]
-        return file_paths
-
-    @task(
-        task_id="send_images_to_telegram",
-        on_failure_callback=[TelegramErrorNotification()],
-    )
-    def send_images(file_paths: List[str], **context) -> None:
-        bot_token = context["var"]["value"].get("telegram_bot_token")
-        chat_id = context["var"]["value"].get("new_notifications_chat_id")
-        topic_id = context["var"]["value"].get("topic_id_for_oa_notifications")
-        proxies = {
-            "http": context["var"]["value"].get("http_proxy"),
-            "https": context["var"]["value"].get("https_proxy"),
-        }
-
-        notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
-
-        captions = (
-            "Готовность зависимостей для Профиля Клиента",
-            "Готовность DM слоя"
+    for _, r in df.iterrows():
+        parts.append(
+            f"• <b>{r['WORKFLOW_NAME']}</b>\n"
+            f"Старт: {r['WF_START_TIME']}\n"
+            f"Завершение: {r['WF_END_TIME']}\n"
+            f"Статус: <b>{r['WF_STATUS']}</b>\n"
+            f"Кол-во записей: <b>{_fmt_int_spaces(r['INSERTED_ROWS'])}</b>\n\n"
         )
 
-        for file_path, caption in zip(file_paths, captions):
-            if file_path:
-                response = notifier.send_image(file_path, caption=caption, proxies=proxies)
-                print(response.text)
-        return None
+    message = "".join(parts)
 
-    send_images(
-        file_paths=render_images(
-            dfs=[
-                fetch_mdm_profile_dependencies_df(vertica_hook),
-                fetch_dm_readiness_df(oracle_hook),
-            ],
-            directory=directory,
-        )
+    print("[INFO] Sending telegram status message...")
+    try:
+        resp = notifier.send_message(message, proxies if proxies else None)
+        print(f"[INFO] TG response: {getattr(resp, 'status_code', resp)}")
+        if hasattr(resp, "text"):
+            print(f"[INFO] TG response text: {resp.text}")
+    except Exception as e:
+        print(f"[ERROR] Telegram send failed: {e}")
+
+
+def send_status_notifications(**context) -> None:
+    today = datetime.date.today().isoformat()
+    last_sent = Variable.get(SENT_VAR, default_var="1970-01-01")
+    print(f"[INFO] Sending step. now_date={today} last_sent={last_sent}")
+
+    if last_sent == today:
+        print("[INFO] Notifications already sent today. Skipping.")
+        return
+
+    df = _fetch_df()
+    print(f"[INFO] Rows fetched for notifications: {len(df)}")
+    if df.empty:
+        print("[WARN] Empty dataframe; skipping send.")
+        return
+
+    not_finished = df[
+        df["WORKFLOW_RUN_ID"].isna()
+        | df["WF_END_TIME"].isna()
+        | df["TASK_END_TIME"].isna()
+    ]
+    if not not_finished.empty:
+        print("[WARN] Data not finished yet; skipping send.")
+        return
+
+    has_errors = (
+        df["WF_STATUS"].isin(["ERROR/WARNING"]).any()
+        or df["TASK_STATUS"].isin(["TASK ERROR/WARNING"]).any()
     )
 
+    # EMAIL
+    subject = "✅ Витрины для баннеров по PFM (каждый вторник)"
+    if has_errors:
+        subject = "❌ Витрины для баннеров по PFM (каждый вторник)"
 
-taskflow()
+    lines = [f"<b>Дата:</b> {today}<br><br>"]
+    for _, r in df.iterrows():
+        lines.append(
+            f"<b>{r['WORKFLOW_NAME']}</b><br>"
+            f"Старт: {r['WF_START_TIME']}<br>"
+            f"Завершение: {r['WF_END_TIME']}<br>"
+            f"Статус: {r['WF_STATUS']}<br>"
+            f"Количество записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}<br><br>"
+        )
+
+    print("[INFO] Sending email...")
+    send_email(
+        to=default_args["email"],
+        subject=subject,
+        html_content="".join(lines),
+    )
+    print("[INFO] Email sent.")
+
+    # TELEGRAM (статусный топик = CVM)
+    _send_telegram_status(df=df, today=today, has_errors=has_errors, **context)
+
+    Variable.set(SENT_VAR, today)
+    print(f"[INFO] Notifications sent. Variable {SENT_VAR} set to {today}")
+
+
+with DAG(
+    dag_id="pfm_start_every_tuesday",
+    default_args=default_args,
+    start_date=datetime.datetime(2025, 1, 1),
+    schedule="0 9 * * *",
+    catchup=False,
+    tags=["pfm"],
+    max_active_runs=1,
+) as dag:
+
+    wait = PythonSensor(
+        task_id="wait_all_workflows_done",
+        python_callable=wait_all_done,
+        mode="reschedule",
+        poke_interval=900,
+        timeout=16 * 60 * 60,
+        # Ошибки Airflow -> Error Notifications
+        on_failure_callback=[TelegramErrorNotification()],
+    )
+
+    notify = PythonOperator(
+        task_id="send_notifications",
+        python_callable=send_status_notifications,
+        # Ошибки Airflow -> Error Notifications
+        on_failure_callback=[TelegramErrorNotification()],
+    )
+
+    wait >> notify

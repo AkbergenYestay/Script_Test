@@ -21,21 +21,18 @@ default_args = {
     "depends_on_past": False,
 }
 
-SENT_VAR = "top_pfm_email_sent"
+SENT_VAR = "pfm_acc_dep_openway_email_sent"
 
 SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
-    -- wf_w4_pfm_top1mcg -> s_m_w4_pfm_top1mcg
-    SELECT 7387 AS workflow_id, 7389 AS task_id FROM dual UNION ALL
+    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
+    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
 
-    -- wf_w4_pfm_top3_transactions -> s_m_w4_pfm_top3_transactions
-    SELECT 7468, 7470 FROM dual UNION ALL
+    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
+    SELECT 8671, 8679 FROM dual UNION ALL
 
-    -- wf_w4_pfm_top3_merchants -> s_m_w4_pfm_top3_merchants
-    SELECT 7427, 7429 FROM dual UNION ALL
-    
-    -- wf_w4_pfm_treat_yourself -> s_m_w4_pfm_treat_yourself
-    SELECT 7418, 7421 FROM dual
+    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
+    SELECT 8690, 8696 FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -205,9 +202,9 @@ def _send_telegram_status(df: pd.DataFrame, today: str, has_errors: bool, **cont
 
     notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
 
-    header = "✅ <b>Витрины для баннеров по PFM (каждый вторник)"
+    header = "✅ <b>PFM account/deposit/openway</b> — статус загрузок"
     if has_errors:
-        header = "❌ <b>Витрины для баннеров по PFM (каждый вторник)</b>"
+        header = "❌ <b>PFM account/deposit/openway</b> — ОШИБКА в загрузках"
 
     parts = [f"{header}\n<b>Дата:</b> {today}\n\n"]
 
@@ -262,9 +259,9 @@ def send_status_notifications(**context) -> None:
     )
 
     # EMAIL
-    subject = "✅ Витрины для баннеров по PFM (каждый вторник)"
+    subject = "✅ PFM account / deposit / openway — статус загрузок"
     if has_errors:
-        subject = "❌ Витрины для баннеров по PFM (каждый вторник)"
+        subject = "❌ PFM account / deposit / openway — ОШИБКА в загрузках"
 
     lines = [f"<b>Дата:</b> {today}<br><br>"]
     for _, r in df.iterrows():
@@ -284,7 +281,7 @@ def send_status_notifications(**context) -> None:
     )
     print("[INFO] Email sent.")
 
-    # TELEGRAM (статусный топик = CVM)
+    # TELEGRAM (топик = CVM)
     _send_telegram_status(df=df, today=today, has_errors=has_errors, **context)
 
     Variable.set(SENT_VAR, today)
@@ -292,9 +289,9 @@ def send_status_notifications(**context) -> None:
 
 
 with DAG(
-    dag_id="pfm_start_every_tuesday",
+    dag_id="pfm_acc_dep_openway_send_notifications",
     default_args=default_args,
-    start_date=datetime.datetime(2025, 1, 1),
+    start_date=datetime.datetime(2026, 1, 22),
     schedule="0 9 * * *",
     catchup=False,
     tags=["pfm"],
@@ -305,7 +302,7 @@ with DAG(
         task_id="wait_all_workflows_done",
         python_callable=wait_all_done,
         mode="reschedule",
-        poke_interval=900,
+        poke_interval=600,
         timeout=16 * 60 * 60,
         # Ошибки Airflow -> Error Notifications
         on_failure_callback=[TelegramErrorNotification()],

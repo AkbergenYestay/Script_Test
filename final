@@ -1,10 +1,146 @@
+import datetime
+import pandas as pd
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.utils.email import send_email
+from airflow.models import Variable
+
+from source.telegram_topic_notifier import TelegramTopicNotifier
+from source.telegram_notifications import TelegramErrorNotification
+
+
+default_args = {
+    "owner": "Yestay",
+    "email": [
+        "EstayA@halykbank.kz",  # "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
+    ],
+    "email_on_failure": True,
+    "depends_on_past": False,
+}
+
+# ====== настройки "по мере готовности" ======
 SENT_VAR_PREFIX = "pfm_acc_dep_openway_email_sent"
 
 NEED = [
-    {"workflow_id": 8661, "task_id": 8663},  # account
-    {"workflow_id": 8671, "task_id": 8679},  # deposit
-    {"workflow_id": 8690, "task_id": 8696},  # openway
+    {"workflow_id": 8661, "task_id": 8663},  # wf_PROD_edw_to_operations_account
+    {"workflow_id": 8671, "task_id": 8679},  # wf_PROD_edw_to_operations_deposit
+    {"workflow_id": 8690, "task_id": 8696},  # wf_PROD_edw_to_operations_openway
 ]
+
+SQL_MONITOR_WF_TASK_BY_ID = """
+WITH need AS (
+    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
+    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
+    SELECT 8671, 8679 FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
+    SELECT 8690, 8696 FROM dual
+),
+last_wf_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time AS wf_start_time,
+        r.end_time   AS wf_end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
+      AND r.workflow_id IN (SELECT workflow_id FROM need)
+),
+ins_rows AS (
+    SELECT
+        s.workflow_run_id,
+        MAX(s.affected_rows) AS inserted_rows
+    FROM RB_REP.OPB_SWIDGINST_LOG s
+    GROUP BY s.workflow_run_id
+),
+last_task_run AS (
+    SELECT
+        tr.workflow_run_id,
+        tr.instance_id,
+        tr.instance_name,
+        tr.task_id,
+        tr.start_time AS task_start_time,
+
+        CASE
+            WHEN tr.end_time IS NULL THEN NULL
+            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
+            WHEN tr.end_time > SYSDATE THEN NULL
+            ELSE tr.end_time
+        END AS task_end_time,
+
+        tr.run_err_code AS task_run_err_code,
+        ROW_NUMBER() OVER (
+            PARTITION BY tr.workflow_run_id, tr.instance_id
+            ORDER BY tr.start_time DESC
+        ) rn
+    FROM RB_REP.OPB_TASK_INST_RUN tr
+    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
+      AND tr.task_id IN (SELECT task_id FROM need)
+)
+SELECT
+    w.workflow_name,
+    w.workflow_id,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
+        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END AS wf_status,
+    NVL(ir.inserted_rows, 0) AS inserted_rows,
+
+    n.task_id,
+    tr.task_start_time,
+    tr.task_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
+        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
+        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+        ELSE 'TASK SUCCESS'
+    END AS task_status
+FROM need n
+LEFT JOIN last_wf_run w
+    ON w.workflow_id = n.workflow_id
+   AND w.rn = 1
+LEFT JOIN ins_rows ir
+    ON ir.workflow_run_id = w.workflow_run_id
+LEFT JOIN last_task_run tr
+    ON tr.workflow_run_id = w.workflow_run_id
+   AND tr.task_id = n.task_id
+   AND tr.rn = 1
+ORDER BY n.workflow_id
+"""
+
+
+def _fmt_int_spaces(v) -> str:
+    try:
+        return f"{int(v):,}".replace(",", " ")
+    except Exception:
+        return "0"
+
+
+def _fetch_df() -> pd.DataFrame:
+    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
+    conn = oracle_hook.get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
+            rows = cursor.fetchall()
+            cols = [c[0] for c in cursor.description]
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=cols)
 
 
 def _sent_key(workflow_id: int) -> str:
@@ -68,12 +204,15 @@ def _send_telegram_status_one(row: pd.Series, today: str, has_errors: bool, **co
     if https_proxy:
         proxies["https"] = https_proxy
 
+    print(f"[INFO] TG vars: bot={'YES' if bot_token else 'NO'} chat_id={chat_id} topic_id={topic_id}")
+    print(f"[INFO] TG proxies: {proxies if proxies else 'NO'}")
+
     if not bot_token or not chat_id or not topic_id:
-        print("[WARN] Telegram vars not set fully. Skipping telegram.")
+        print("[WARN] Telegram vars are not set fully (bot_token/chat_id/topic_id). Skipping telegram.")
         return
 
     try:
-        topic_id = int(topic_id)
+        topic_id = int(topic_id)  # важно: message_thread_id должен быть int
     except Exception as e:
         print(f"[ERROR] topic_id must be int, got={topic_id}. Error: {e}")
         return
@@ -160,3 +299,37 @@ def send_one_notification(workflow_id: int, **context) -> None:
 
     Variable.set(sent_var, today)
     print(f"[INFO] Notification sent. Variable {sent_var} set to {today}")
+
+
+with DAG(
+    dag_id="pfm_acc_dep_openway_send_notifications",
+    default_args=default_args,
+    start_date=datetime.datetime(2026, 1, 22),
+    schedule="0 9 * * *",
+    catchup=False,
+    tags=["pfm"],
+    max_active_runs=1,
+) as dag:
+
+    for item in NEED:
+        wf_id = item["workflow_id"]
+        task_id = item["task_id"]
+
+        wait = PythonSensor(
+            task_id=f"wait_wf_{wf_id}_done",
+            python_callable=wait_one_done,
+            op_kwargs={"workflow_id": wf_id, "task_id": task_id},
+            mode="reschedule",
+            poke_interval=600,          # 10 минут
+            timeout=16 * 60 * 60,       # 16 часов
+            on_failure_callback=[TelegramErrorNotification()],
+        )
+
+        notify = PythonOperator(
+            task_id=f"notify_wf_{wf_id}",
+            python_callable=send_one_notification,
+            op_kwargs={"workflow_id": wf_id},
+            on_failure_callback=[TelegramErrorNotification()],
+        )
+
+        wait >> notify

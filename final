@@ -24,22 +24,27 @@ default_args = {
 # ====== настройки "по мере готовности" ======
 SENT_VAR_PREFIX = "pfm_acc_dep_openway_email_sent"
 
+# NEW workflows/tasks
 NEED = [
-    {"workflow_id": 8661, "task_id": 8663},  # wf_PROD_edw_to_operations_account
-    {"workflow_id": 8671, "task_id": 8679},  # wf_PROD_edw_to_operations_deposit
-    {"workflow_id": 8690, "task_id": 8696},  # wf_PROD_edw_to_operations_openway
+    {"workflow_id": 7387, "task_id": 7389},  # wf_w4_pfm_top1mcg -> s_m_w4_pfm_top1mcg
+    {"workflow_id": 7468, "task_id": 7470},  # wf_w4_pfm_top3_transactions -> s_m_w4_pfm_top3_transactions
+    {"workflow_id": 7427, "task_id": 7429},  # wf_w4_pfm_top3_merchants -> s_m_w4_pfm_top3_merchants
+    {"workflow_id": 7418, "task_id": 7421},  # wf_w4_pfm_treat_yourself -> s_m_w4_pfm_treat_yourself
 ]
 
 SQL_MONITOR_WF_TASK_BY_ID = """
 WITH need AS (
-    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
-    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
+    -- wf_w4_pfm_top1mcg -> s_m_w4_pfm_top1mcg
+    SELECT 7387 AS workflow_id, 7389 AS task_id FROM dual UNION ALL
 
-    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
-    SELECT 8671, 8679 FROM dual UNION ALL
+    -- wf_w4_pfm_top3_transactions -> s_m_w4_pfm_top3_transactions
+    SELECT 7468, 7470 FROM dual UNION ALL
 
-    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
-    SELECT 8690, 8696 FROM dual
+    -- wf_w4_pfm_top3_merchants -> s_m_w4_pfm_top3_merchants
+    SELECT 7427, 7429 FROM dual UNION ALL
+
+    -- wf_w4_pfm_treat_yourself -> s_m_w4_pfm_treat_yourself
+    SELECT 7418, 7421 FROM dual
 ),
 last_wf_run AS (
     SELECT
@@ -159,7 +164,7 @@ def wait_one_done(workflow_id: int, task_id: int, **context) -> bool:
     last_sent = Variable.get(sent_var, default_var="1970-01-01")
     print(f"[INFO] wait_one_done wf={workflow_id} task={task_id} today={today} last_sent={last_sent}")
 
-    # Уже отправляли сегодня по этому workflow -> сенсор сразу пропускает
+    # Уже отправляли сегодня по этому workflow
     if last_sent == today:
         print("[INFO] Already sent today for this workflow. Sensor succeeds.")
         return True
@@ -204,22 +209,19 @@ def _send_telegram_status_one(row: pd.Series, today: str, has_errors: bool, **co
     if https_proxy:
         proxies["https"] = https_proxy
 
-    print(f"[INFO] TG vars: bot={'YES' if bot_token else 'NO'} chat_id={chat_id} topic_id={topic_id}")
-    print(f"[INFO] TG proxies: {proxies if proxies else 'NO'}")
-
     if not bot_token or not chat_id or not topic_id:
         print("[WARN] Telegram vars are not set fully (bot_token/chat_id/topic_id). Skipping telegram.")
         return
 
     try:
-        topic_id = int(topic_id)  # важно: message_thread_id должен быть int
+        topic_id = int(topic_id)
     except Exception as e:
         print(f"[ERROR] topic_id must be int, got={topic_id}. Error: {e}")
         return
 
     notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
 
-    header = f"✅ <b>{row['WORKFLOW_NAME']}</b> — загрузка готова"
+    header = f"✅ <b>{row['WORKFLOW_NAME']}</b> - статус загрузки PFM"
     if has_errors:
         header = f"❌ <b>{row['WORKFLOW_NAME']}</b> — ОШИБКА/ПРЕДУПРЕЖДЕНИЕ"
 
@@ -230,7 +232,7 @@ def _send_telegram_status_one(row: pd.Series, today: str, has_errors: bool, **co
         f"Завершение: {row['WF_END_TIME']}\n"
         f"Статус WF: <b>{row['WF_STATUS']}</b>\n"
         f"Статус TASK: <b>{row['TASK_STATUS']}</b>\n"
-        f"Кол-во записей: <b>{_fmt_int_spaces(row['INSERTED_ROWS'])}</b>\n"
+        f"Количество записей: <b>{_fmt_int_spaces(row['INSERTED_ROWS'])}</b>\n"
     )
 
     print("[INFO] Sending telegram message (one workflow)...")
@@ -261,7 +263,6 @@ def send_one_notification(workflow_id: int, **context) -> None:
 
     r = one.iloc[0]
 
-    # На всякий случай ещё раз проверим готовность (чтобы не слать раньше)
     not_ready = (
         pd.isna(r["WORKFLOW_RUN_ID"])
         or pd.isna(r["WF_END_TIME"])
@@ -273,7 +274,7 @@ def send_one_notification(workflow_id: int, **context) -> None:
 
     has_errors = (r["WF_STATUS"] == "ERROR/WARNING") or (r["TASK_STATUS"] == "TASK ERROR/WARNING")
 
-    subject = f"✅ {r['WORKFLOW_NAME']} — статус загрузки"
+    subject = f"✅ {r['WORKFLOW_NAME']} — статус загрузки PFM"
     if has_errors:
         subject = f"❌ {r['WORKFLOW_NAME']} — ОШИБКА в загрузке"
 

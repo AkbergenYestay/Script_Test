@@ -1,157 +1,88 @@
-SELECT * FROM (
-select distinct
-	wf.workflow_id as WORKFLOW_ID,
-	nvl(lower(wrm.workflow_name), lower(wfname.workflow_name)) as WF_NAME,
-	wrm.start_time as WF_STARTTIME,
-	wrm.end_time as WF_ENDTIME,
-	CASE
-      WHEN wrm.RUN_ERR_CODE <> 0 THEN 'ERROR/WARNING'
-      WHEN wrm.RUN_ERR_CODE = 0 AND wrm.START_TIME IS NOT NULL AND wrm.END_TIME IS NULL THEN 'RUNNING'
-      WHEN wrm.START_TIME IS NULL THEN 'NOT STARTED'
-      ELSE 'SUCCESS'
-    END      WF_STATUS,
-	ins.instance_name as INST_NAME,
-	ins.ins_status as INST_STATUS,
-	ins.start_time as INST_STARTTIME,
-	ins.end_time as INST_ENDTIME,
-	to_char(to_date(s.START_TIME, 'mm.dd.yyyy HH24:MI:SS'), 'HH24:MI:SS') as WF_SCHEDTIME
-from RB_REP.OPB_workflow wf
--- MAIN WORKFLOW
-	left join ( select workflow_name, workflow_id, max(start_time) 
-				from RB_REP.OPB_WFLOW_RUN
-				where 1=1 --and workflow_id in (5810, 5731)
-				group by workflow_name, workflow_id
-	) wfname on wfname.workflow_id=wf.workflow_id
--- SHEDULER TIME	
-	left join RB_REP.OPB_SCHEDULER s ON s.SCHEDULER_ID = wf.SCHEDULER_ID
--- WORKFLOW RUN	
-	left join ( select * 
-				from RB_REP.OPB_WFLOW_RUN t0
-				where 1=1
-				and trunc(START_TIME) = trunc(SYSDATE)
-				--and t0.workflow_id = 5810
-				and t0.START_TIME = (
-					select max(t1.start_time) 
-					from RB_REP.OPB_WFLOW_RUN t1 
-					where 1=1
-					and t1.workflow_id = t0.workflow_id
-			  )
-	) wrm on wf.workflow_id = wrm.workflow_id
--- INSTANCE STATUS	
-	left join ( select ins.workflow_id, ins.instance_name, run.start_time, run.end_time,
-				case
-			      when run.RUN_ERR_CODE <> 0 THEN 'ERROR/WARNING'
-			      when run.RUN_STATUS_CODE = 6 AND run.START_TIME IS NOT NULL AND run.END_TIME = DATE '1753-01-01' THEN 'RUNNING'
-			      when run.START_TIME IS NULL THEN 'NOT STARTED'
-			      when run.RUN_STATUS_CODE = 1 THEN 'SUCCESS'
-			      else 'SUCCESS'
-				end ins_status
-				from rb_rep.opb_task_inst ins
-				left join (
-					select * from RB_REP.OPB_TASK_INST_RUN t0
-					where 1=1
-					and trunc(t0.start_time) = trunc(sysdate)
-					--and t0.workflow_id = 5810
-					--and t0.task_type = 68
-					and lower(t0.instance_name) not like '%sys_dependency%'
-					and t0.start_time = (
-						select max(t1.start_time) 
-						from rb_rep.opb_task_inst_run t1 
-						where 1=1
-						and t1.start_time=t0.start_time
-						and t0.instance_id=t1.instance_id
-					)
-				) run on run.instance_id = ins.instance_id 
-			where 1=1
-			and lower(run.instance_name) not like '%sys_dependency%'
-			--and ins.workflow_id = 5810
-			and ins.task_type = 68
-	) ins on wf.workflow_id = ins.workflow_id
-where 1=1
-and (wf.workflow_id in (
-	5810 	-- wf_rb2_fs_trans_all
-	,5731 	-- wf_rb2_fs_cred_all
-	,5952	-- wf_rb2_fs_depo
-	,6106	-- wf_rb3_fs_payments
-	,4398	-- wf_rb2_fs_pkb_client_reports
-	,4706	-- wf_rb2_cred_manager_bzk
-	--,4543	-- wf_rb2_FOLLOW_UP_BZK
-	,4911	-- wf_rb2_cred_zayavki_ar_tr_cmd_request
-	,5137	-- wf_rb2_pkb_payments
-	,6272	-- wf_rb2_cred_od_prod_contr
-) )--or lower(wfname.workflow_name) = 'wf_rb2_follow_up_bzk' or lower(wrm.workflow_name)='wf_rb2_follow_up_bzk')	
-UNION ALL	------------------------------------------------------------------------------------------------------------------------
-select distinct
-	wf.workflow_id as WORKFLOW_ID,
-	nvl(wrm.workflow_name, wfname.workflow_name) as WF_NAME,
-	wrm.start_time as WF_STARTTIME,
-	wrm.end_time as WF_ENDTIME,
-	CASE
-      WHEN wrm.RUN_ERR_CODE <> 0 THEN 'ERROR/WARNING'
-      WHEN wrm.RUN_ERR_CODE = 0 AND wrm.START_TIME IS NOT NULL AND wrm.END_TIME IS NULL THEN 'RUNNING'
-      WHEN wrm.START_TIME IS NULL THEN 'NOT STARTED'
-      ELSE 'SUCCESS'
-    END WF_STATUS,
-	ins.instance_name as INST_NAME,
-	ins.ins_status as INST_STATUS,
-	ins.start_time as INST_STARTTIME,
-	ins.end_time as INST_ENDTIME,
-	to_char(to_date(s.START_TIME, 'mm.dd.yyyy HH24:MI:SS'), 'HH24:MI:SS') as WF_SCHEDTIME
-from RB_REP.OPB_workflow wf
--- MAIN WORKFLOW
-	left join ( select workflow_name, workflow_id, max(start_time) 
-				from RB_REP.OPB_WFLOW_RUN
-				where 1=1 --and workflow_id in (3985)
-				group by workflow_name, workflow_id
-	) wfname on wfname.workflow_id=wf.workflow_id
--- SHEDULER TIME	
-	left join RB_REP.OPB_SCHEDULER s ON s.SCHEDULER_ID = wf.SCHEDULER_ID
--- WORKFLOW RUN	
-	left join ( select * 
-				from RB_REP.OPB_WFLOW_RUN t0
-				where 1=1
-				and trunc(START_TIME) = trunc(SYSDATE-1)
-				--and t0.workflow_id = 3985
-				and t0.START_TIME = (
-					select max(t1.start_time) 
-					from RB_REP.OPB_WFLOW_RUN t1 
-					where 1=1
-					and t1.workflow_id = t0.workflow_id
-			  )
-	) wrm on wf.workflow_id = wrm.workflow_id
--- INSTANCE STATUS	
-	left join ( select ins.workflow_id, ins.instance_name, run.start_time, run.end_time,
-				case
-			      when run.RUN_ERR_CODE <> 0 THEN 'ERROR/WARNING'
-			      when run.RUN_STATUS_CODE = 6 AND run.START_TIME IS NOT NULL AND run.END_TIME = DATE '1753-01-01' THEN 'RUNNING'
-			      when run.START_TIME IS NULL THEN 'NOT STARTED'
-			      when run.RUN_STATUS_CODE = 1 THEN 'SUCCESS'
-			      else 'SUCCESS'
-				end ins_status
-				from rb_rep.opb_task_inst ins
-				inner join (
-					select * from RB_REP.OPB_TASK_INST_RUN t0
-					where 1=1
-					and trunc(t0.start_time) = trunc(sysdate-1)
-					--and t0.workflow_id = 3985
-					--and t0.task_type = 68
-					and t0.instance_name not like '%sys_dependency%'
-					and t0.start_time = (
-						select max(t1.start_time) 
-						from rb_rep.opb_task_inst_run t1 
-						where 1=1
-						and t1.start_time=t0.start_time
-						and t0.instance_id=t1.instance_id
-					)
-				) run on run.instance_id = ins.instance_id 
-			where 1=1 
-			and lower(run.instance_name) not like '%sys_dependency%'
-			--and ins.workflow_id = 3985
-			and ins.task_type = 68
-	) ins on wf.workflow_id = ins.workflow_id
-where 1=1
-and (wf.workflow_id in  (
-	3985 	-- 'wf_rb2_fs_trans_out'
-)  or lower(wfname.workflow_name) = 'wf_rb2_follow_up_bzk' or lower(wrm.workflow_name)='wf_rb2_follow_up_bzk')
+WITH date_filter AS (	
+    select
+		/*date 'B_DATE' AS b_date,
+        date 'E_DATE' AS e_date */
+		
+		add_months(trunc(sysdate, 'mm'), -1) as b_date,
+		trunc(sysdate, 'mm') as e_date
+    from dual
+),
+xls AS (
+    SELECT 
+        t1.tc_txn_iid,t1.DATE_VALUE
+    FROM dds.W4_TC_TXN_XLS_FL t1
+    WHERE 
+        t1.txn_type = 22
+        AND t1.DATE_VALUE >= (SELECT b_date FROM date_filter) - 20
+        AND t1.DATE_VALUE < (SELECT e_date FROM date_filter) + 5
+),
+bonus as (
+  select 
+	  a.iin, 
+	  sum(amount) as amount
+	  from (
+	  SELECT distinct
+	      g.iin_bin as iin,
+	      t.term_gm_subject_id,
+	      t.tc_txn_link_iid,
+	      t.tc_txn_iid,
+	      t.txn_type,
+	      t.txn_source,
+	      t.txn_date,
+	      t.void_txn_iid,
+	      t.void_orig_txn_iid,
+	      ta.fact_amount as amount,
+	      t.terminal_no,
+	      ta.txn_type txn_type_ta,
+	      T.PROCESS_DATE_UTC,
+	      T.ORIG_PURCH_AMT,
+	      t.txn_ext_ref,
+	      s.campaign_name
+	  FROM dds.W4_TC_TXN_XLS_FL t
+	  LEFT JOIN DDS.W4_TC_TXN_AMOUNT_XLS_FL ta ON ta.tc_txn_iid = t.tc_txn_iid
+	  LEFT join dds.W4_CAMPAIGN_XLS_S s ON ta.w4_campaign_xls_h_iid = s.dwh_id AND s.is_actual = 'A'
+	  join dds.gm_subject_h g on t.term_gm_subject_id = g.dwh_id
+	  WHERE 1=1
+	    and t.date_value >= (SELECT b_date FROM date_filter)
+	    and ta.date_value >= (SELECT b_date FROM date_filter)
+	    and t.date_value < (SELECT e_date FROM date_filter) + 5
+	    and ta.date_value < (SELECT e_date FROM date_filter) + 5
+	    and trunc(t.txn_date) >= (SELECT b_date FROM date_filter)
+	    and trunc(t.txn_date) < (SELECT e_date FROM date_filter)  
+	    and trunc(T.PROCESS_DATE_UTC) >= (SELECT b_date FROM date_filter)
+	    and trunc(T.PROCESS_DATE_UTC) < (SELECT e_date FROM date_filter)
+	    and ta.txn_type NOT IN (52, 4, 99)
+	    and t.txn_type <> 5
+	    AND (
+	        NVL(t.orig_purch_amt, 0) <> 0 
+	        OR NVL(t.disc_amt, 0) <> 0 
+	        OR NVL(t.rdm_amt, 0) <> 0 
+	        OR NVL(t.awd_amt, 0) <> 0 
+	        OR t.txn_source IN (2, 4, 13, 14, 15)
+	        OR (t.txn_source = 17 AND t.txn_type = 1)
+	        OR (t.txn_source = 17 AND t.txn_type = 5)
+	    )
+	    AND NOT (
+	        t.txn_type = 22
+	        OR (t.txn_type = 2 AND t.txn_source = 17)
+	        OR (
+	            t.txn_type = 5 
+	            AND t.void_orig_txn_iid IN (
+	                SELECT tc_txn_iid FROM xls WHERE date_value = t.date_value
+	            )
+	        )
+	    ) 
+	  ) a
+  where a.amount > 0
+  group by a.iin
+  having sum(amount) >= 200
 )
-ORDER BY wf_starttime, wf_name
+select /* +PARALLEL(8)*/
+	b.iin, 
+	round(b.amount) as amount,
+	'bonus_proc' as product_code,
+	trunc(sysdate) as snapshot_date,
+	'["' || to_char(trunc(sysdate, 'mm') + 1, 'DD.MM.YYYY HH24:MI:SS') || '","' || to_char(trunc(sysdate, 'mm') + 14, 'DD.MM.YYYY HH24:MI:SS') || '"]' as period,
+	'month' as period_type,
+	trunc(sysdate) as upload_date
+from bonus b

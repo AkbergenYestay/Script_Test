@@ -1,3 +1,15 @@
+(WITH base AS (
+	  SELECT FROM_TZ(CAST(TRUNC(CURRENT_DATE) AS TIMESTAMP), '+00:00') AS local_midnight
+	  FROM dual
+	)
+	SELECT
+	  '['
+	  || TO_CHAR(local_midnight - INTERVAL '5' HOUR, 'YYYY-MM-DD HH24:MI:SSTZH:TZM')
+	  || ','
+	  || TO_CHAR(local_midnight + INTERVAL '13' DAY + INTERVAL '19' HOUR, 'YYYY-MM-DD HH24:MI:SSTZH:TZM')
+	  || ')' AS tstzrange_literal
+	FROM base) as period,
+	
 WITH date_filter AS (	
     select
 		/*date 'B_DATE' AS b_date,

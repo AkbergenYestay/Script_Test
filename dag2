@@ -1,11 +1,1 @@
-    -- wf_w4_pfm_top1mcg -> s_m_w4_pfm_top1mcg
-    SELECT 7387 AS workflow_id, 7389 AS task_id FROM dual UNION ALL
 
-    -- wf_w4_pfm_top3_transactions -> s_m_w4_pfm_top3_transactions
-    SELECT 7468, 7470 FROM dual UNION ALL
-
-    -- wf_w4_pfm_top3_merchants -> s_m_w4_pfm_top3_merchants
-    SELECT 7427, 7429 FROM dual UNION ALL
-    
-    -- wf_w4_pfm_treat_yourself -> s_m_w4_pfm_treat_yourself
-    SELECT 7418, 7421 FROM dual

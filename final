@@ -18,7 +18,7 @@ DAG_ID = "wf_4726_incall_centersegmentation_check_7am"
 ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
 
 WORKFLOW_ID = 4726
-WORKFLOW_NAME = "wf_dm_incall_centersegmentation_edw"
+WORKFLOW_NAME_FALLBACK = "wf_dm_incall_centersegmentation_edw"
 
 TOTAL_TASKS = 20
 SENT_VAR = f"{DAG_ID}_sent_date"
@@ -36,7 +36,7 @@ default_args = {
 # ==========================
 # 20 TASK_ID (имена — комментарии)
 # ==========================
-NEED = [
+NEED_TASK_IDS = [
     4731,  # s_MP_INCORRECT_PINCODE
     4737,  # s_MP_DEPOSIT_SEGMENT
     4740,  # s_MP_CARD_BLOCK
@@ -58,44 +58,63 @@ NEED = [
     4732,  # s_MP_BENEFIT_SEGMENT
 ]
 
-# ==========================
-# SQL
-# ==========================
-SQL = f"""
+# ВАЖНО: у тебя было "20 из 20", но в списке с картинки 19 id.
+# Добавь 20-й task_id сюда, иначе ожидание 20/20 никогда не выполнится.
+# Например:
+# NEED_TASK_IDS.append(XXXX)  # <--- 20-й таск
+
+
+def _need_union_sql() -> str:
+    parts = []
+    for tid in NEED_TASK_IDS:
+        parts.append(f"SELECT {WORKFLOW_ID} AS workflow_id, {int(tid)} AS task_id FROM dual")
+    return "\nUNION ALL\n".join(parts)
+
+
+SQL_CHECK = """
 WITH need AS (
-    {" UNION ALL ".join([f"SELECT {WORKFLOW_ID} workflow_id, {t} task_id FROM dual" for t in NEED])}
+    {need_union}
 ),
-wf AS (
+last_wf_run AS (
     SELECT
         r.workflow_id,
         r.workflow_name,
         r.workflow_run_id,
-        r.start_time wf_start_time,
-        r.end_time   wf_end_time,
+        r.start_time AS wf_start_time,
+        r.end_time   AS wf_end_time,
         r.run_err_code,
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE r.start_time >= TRUNC(SYSDATE) - 1
+    WHERE r.workflow_id = {workflow_id}
+      AND r.start_time >= TRUNC(SYSDATE) - 1
       AND r.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
 ),
-tasks AS (
+last_task_run AS (
     SELECT
         tr.workflow_run_id,
         tr.task_id,
-        tr.start_time,
-        tr.end_time,
-        tr.run_err_code,
+        tr.instance_name,
+        tr.start_time AS task_start_time,
+        tr.end_time   AS task_end_time,
+        tr.run_err_code AS task_run_err_code,
         ROW_NUMBER() OVER (
             PARTITION BY tr.workflow_run_id, tr.task_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
+    JOIN last_wf_run w
+      ON w.workflow_run_id = tr.workflow_run_id
+     AND w.rn = 1
+    JOIN need n
+      ON n.task_id = tr.task_id
+     AND n.workflow_id = w.workflow_id
     WHERE tr.start_time >= TRUNC(SYSDATE) - 1
       AND tr.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
-      AND tr.task_id IN (SELECT task_id FROM need)
+      AND LOWER(tr.instance_name) NOT LIKE '%sys_dependency%'
 )
 SELECT
-    w.workflow_name,
+    w.workflow_id,
+    NVL(w.workflow_name, '{wf_name_fallback}') AS workflow_name,
     w.workflow_run_id,
     w.wf_start_time,
     w.wf_end_time,
@@ -104,16 +123,21 @@ SELECT
         WHEN w.wf_end_time IS NULL THEN 'RUNNING'
         WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
-    END wf_status,
-    COUNT(t.task_id) total_tasks,
-    COUNT(t.end_time) finished_tasks,
-    SUM(CASE WHEN NVL(t.run_err_code,0) <> 0 THEN 1 ELSE 0 END) error_tasks
-FROM wf w
-LEFT JOIN tasks t
-    ON t.workflow_run_id = w.workflow_run_id
-   AND t.rn = 1
+    END AS wf_status,
+
+    COUNT(n.task_id) AS total_tasks,
+    SUM(CASE WHEN t.task_end_time IS NOT NULL THEN 1 ELSE 0 END) AS finished_tasks,
+    SUM(CASE WHEN NVL(t.task_run_err_code,0) <> 0 THEN 1 ELSE 0 END) AS error_tasks
+FROM last_wf_run w
+JOIN need n
+  ON n.workflow_id = w.workflow_id
+LEFT JOIN last_task_run t
+  ON t.workflow_run_id = w.workflow_run_id
+ AND t.task_id = n.task_id
+ AND t.rn = 1
 WHERE w.rn = 1
 GROUP BY
+    w.workflow_id,
     w.workflow_name,
     w.workflow_run_id,
     w.wf_start_time,
@@ -121,83 +145,117 @@ GROUP BY
     w.run_err_code
 """
 
-# ==========================
-# FUNCTIONS
-# ==========================
-def fetch_df():
+
+def fetch_df() -> pd.DataFrame:
+    sql = SQL_CHECK.format(
+        need_union=_need_union_sql(),
+        workflow_id=WORKFLOW_ID,
+        wf_name_fallback=WORKFLOW_NAME_FALLBACK,
+    )
+
     hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
     conn = hook.get_conn()
     try:
         with conn.cursor() as cur:
-            cur.execute(SQL)
+            cur.execute(sql)
             rows = cur.fetchall()
-            cols = [c[0] for c in cur.description]
+            cols = [c[0].upper() for c in cur.description]
     finally:
         conn.close()
+
     return pd.DataFrame(rows, columns=cols)
 
 
-def wait_wf_done(**context):
+def wait_workflow_done(**context) -> bool:
     today = datetime.date.today().isoformat()
     if Variable.get(SENT_VAR, default_var="") == today:
+        print("[INFO] Already sent today -> sensor success.")
         return True
 
     df = fetch_df()
     if df.empty:
+        print("[INFO] No WF run found yet in window -> waiting.")
         return False
 
     r = df.iloc[0]
-    return (
-        r["WORKFLOW_RUN_ID"] is not None
-        and r["FINISHED_TASKS"] == TOTAL_TASKS
+    finished = int(r["FINISHED_TASKS"] or 0)
+    total = int(r["TOTAL_TASKS"] or 0)
+    print(f"[INFO] WF={r['WORKFLOW_NAME']} status={r['WF_STATUS']} progress={finished}/{total}")
+
+    # ждать пока завершатся все таски из NEED
+    return finished >= total and total == len(NEED_TASK_IDS)
+
+
+def _send_telegram_message(text: str, **context) -> None:
+    bot_token = context["var"]["value"].get("telegram_bot_token")
+    chat_id = context["var"]["value"].get("new_notifications_chat_id")
+    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
+
+    if not bot_token or not chat_id or not topic_id:
+        print("[WARN] Telegram vars not set fully. Skip telegram.")
+        return
+
+    notifier = TelegramTopicNotifier(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        topic_id=int(topic_id),
     )
+    notifier.send_message(text)
 
 
-def send_telegram(**context):
+def send_final_status(**context) -> None:
     today = datetime.date.today().isoformat()
     if Variable.get(SENT_VAR, default_var="") == today:
+        print("[INFO] Already sent today -> skip notify.")
         return
 
     df = fetch_df()
+    if df.empty:
+        print("[WARN] No data -> skip notify.")
+        return
+
     r = df.iloc[0]
+    wf_name = r["WORKFLOW_NAME"]
+    wf_start = r["WF_START_TIME"]
+    wf_end = r["WF_END_TIME"]
+    wf_status = r["WF_STATUS"]
 
-    icon = "✅" if r["WF_STATUS"] == "SUCCESS" and r["ERROR_TASKS"] == 0 else "❌"
+    finished = int(r["FINISHED_TASKS"] or 0)
+    total = int(r["TOTAL_TASKS"] or 0)
+    errors = int(r["ERROR_TASKS"] or 0)
 
-    message = (
-        f"{icon} <b>{WORKFLOW_NAME}</b>\n\n"
-        f"Дата: {today}\n\n"
-        f"WF start: {r['WF_START_TIME']}\n"
-        f"WF end:   {r['WF_END_TIME']}\n"
-        f"WF status: <b>{r['WF_STATUS']}</b>\n\n"
-        f"Задачи: <b>{r['FINISHED_TASKS']} из {TOTAL_TASKS}</b>"
+    has_errors = (wf_status == "ERROR/WARNING") or (errors > 0)
+    icon = "✅" if not has_errors else "❌"
+
+    msg = (
+        f"{icon} <b>{wf_name}</b>\n\n"
+        f"<b>Дата:</b> {today}\n\n"
+        f"WF start: {wf_start}\n"
+        f"WF end:   {wf_end}\n"
+        f"WF status: <b>{wf_status}</b>\n\n"
+        f"<b>Задачи:</b> выполнено <b>{finished}</b> из <b>{total}</b>\n"
+        f"<b>Ошибок:</b> {errors}"
     )
 
-    notifier = TelegramTopicNotifier(
-        bot_token=context["var"]["value"]["telegram_bot_token"],
-        chat_id=context["var"]["value"]["new_notifications_chat_id"],
-        topic_id=int(context["var"]["value"]["topic_id_for_cvm_notifications"]),
-    )
-    notifier.send_message(message)
+    _send_telegram_message(msg, **context)
 
     Variable.set(SENT_VAR, today)
+    print(f"[INFO] Sent. Variable {SENT_VAR} set to {today}")
 
 
-# ==========================
-# DAG
-# ==========================
 with DAG(
     dag_id=DAG_ID,
     default_args=default_args,
     start_date=datetime.datetime(2026, 2, 1),
-    schedule="0 7 * * *",   # каждый день в 07:00
+    schedule="0 7 * * *",  # DAG проверяет в 07:00
     catchup=False,
     max_active_runs=1,
     tags=["informatica", "monitoring", "telegram"],
 ) as dag:
 
     wait = PythonSensor(
-        task_id="wait_workflow_done",
-        python_callable=wait_wf_done,
+        task_id="wait_wf_4726_all_tasks_done",
+        python_callable=wait_workflow_done,
         poke_interval=POKE_INTERVAL,
         timeout=TIMEOUT,
         mode="reschedule",
@@ -205,8 +263,8 @@ with DAG(
     )
 
     notify = PythonOperator(
-        task_id="send_final_status",
-        python_callable=send_telegram,
+        task_id="notify_wf_4726_status",
+        python_callable=send_final_status,
         on_failure_callback=[TelegramErrorNotification()],
     )
 

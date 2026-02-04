@@ -1,1 +1,213 @@
+import datetime
+import pandas as pd
 
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.models import Variable
+
+from source.telegram_topic_notifier import TelegramTopicNotifier
+from source.telegram_notifications import TelegramErrorNotification
+
+
+# ==========================
+# НАСТРОЙКИ
+# ==========================
+DAG_ID = "wf_4726_incall_centersegmentation_check_7am"
+ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
+
+WORKFLOW_ID = 4726
+WORKFLOW_NAME = "wf_dm_incall_centersegmentation_edw"
+
+TOTAL_TASKS = 20
+SENT_VAR = f"{DAG_ID}_sent_date"
+
+POKE_INTERVAL = 600          # 10 минут
+TIMEOUT = 6 * 60 * 60        # 6 часов (с 07:00 до 13:00)
+
+default_args = {
+    "owner": "Yestay",
+    "email": ["EstayA@halykbank.kz"],
+    "email_on_failure": True,
+    "depends_on_past": False,
+}
+
+# ==========================
+# 20 TASK_ID (имена — комментарии)
+# ==========================
+NEED = [
+    4731,  # s_MP_INCORRECT_PINCODE
+    4737,  # s_MP_DEPOSIT_SEGMENT
+    4740,  # s_MP_CARD_BLOCK
+    4738,  # s_MP_ACTIVITY_SEGMENTATION
+    4736,  # s_M_TO_DSSB_RETIREES_DETAILED
+    4739,  # s_MP_SERVICE_CHAN_SEGMENT
+    4778,  # s_MP_LOST_CARDS
+    4746,  # s_MP_CALL_CENTER_SERVICE
+    4727,  # s_MP_LOAN_HALYK_SEGMENT
+    4735,  # s_MP_LOANTYPE_SEGMENT
+    4745,  # s_MP_ATM_SERVICE_SEGMENTATION
+    4728,  # s_M_COMMUNICATION_LAST_7_DAYS
+    4743,  # s_MP_DM_INCALL_CENTERSEGMENTATION
+    4733,  # s_MP_LOAN_NUM_SEGMENT
+    4742,  # s_MP_DM_INCALL_CENTERSEGMENTATION_NEW
+    4741,  # s_MP_SERVICES_SEGMENTATION
+    4747,  # s_MP_ONLINE_TRANSACTION_SEGMENTATION
+    4744,  # s_MP_PERSON_INDIVIDUAL_SEGMENTATION
+    4732,  # s_MP_BENEFIT_SEGMENT
+]
+
+# ==========================
+# SQL
+# ==========================
+SQL = f"""
+WITH need AS (
+    {" UNION ALL ".join([f"SELECT {WORKFLOW_ID} workflow_id, {t} task_id FROM dual" for t in NEED])}
+),
+wf AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time wf_start_time,
+        r.end_time   wf_end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE r.start_time >= TRUNC(SYSDATE) - 1
+      AND r.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
+),
+tasks AS (
+    SELECT
+        tr.workflow_run_id,
+        tr.task_id,
+        tr.start_time,
+        tr.end_time,
+        tr.run_err_code,
+        ROW_NUMBER() OVER (
+            PARTITION BY tr.workflow_run_id, tr.task_id
+            ORDER BY tr.start_time DESC
+        ) rn
+    FROM RB_REP.OPB_TASK_INST_RUN tr
+    WHERE tr.start_time >= TRUNC(SYSDATE) - 1
+      AND tr.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
+      AND tr.task_id IN (SELECT task_id FROM need)
+)
+SELECT
+    w.workflow_name,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
+        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END wf_status,
+    COUNT(t.task_id) total_tasks,
+    COUNT(t.end_time) finished_tasks,
+    SUM(CASE WHEN NVL(t.run_err_code,0) <> 0 THEN 1 ELSE 0 END) error_tasks
+FROM wf w
+LEFT JOIN tasks t
+    ON t.workflow_run_id = w.workflow_run_id
+   AND t.rn = 1
+WHERE w.rn = 1
+GROUP BY
+    w.workflow_name,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    w.run_err_code
+"""
+
+# ==========================
+# FUNCTIONS
+# ==========================
+def fetch_df():
+    hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
+    conn = hook.get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(SQL)
+            rows = cur.fetchall()
+            cols = [c[0] for c in cur.description]
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def wait_wf_done(**context):
+    today = datetime.date.today().isoformat()
+    if Variable.get(SENT_VAR, default_var="") == today:
+        return True
+
+    df = fetch_df()
+    if df.empty:
+        return False
+
+    r = df.iloc[0]
+    return (
+        r["WORKFLOW_RUN_ID"] is not None
+        and r["FINISHED_TASKS"] == TOTAL_TASKS
+    )
+
+
+def send_telegram(**context):
+    today = datetime.date.today().isoformat()
+    if Variable.get(SENT_VAR, default_var="") == today:
+        return
+
+    df = fetch_df()
+    r = df.iloc[0]
+
+    icon = "✅" if r["WF_STATUS"] == "SUCCESS" and r["ERROR_TASKS"] == 0 else "❌"
+
+    message = (
+        f"{icon} <b>{WORKFLOW_NAME}</b>\n\n"
+        f"Дата: {today}\n\n"
+        f"WF start: {r['WF_START_TIME']}\n"
+        f"WF end:   {r['WF_END_TIME']}\n"
+        f"WF status: <b>{r['WF_STATUS']}</b>\n\n"
+        f"Задачи: <b>{r['FINISHED_TASKS']} из {TOTAL_TASKS}</b>"
+    )
+
+    notifier = TelegramTopicNotifier(
+        bot_token=context["var"]["value"]["telegram_bot_token"],
+        chat_id=context["var"]["value"]["new_notifications_chat_id"],
+        topic_id=int(context["var"]["value"]["topic_id_for_cvm_notifications"]),
+    )
+    notifier.send_message(message)
+
+    Variable.set(SENT_VAR, today)
+
+
+# ==========================
+# DAG
+# ==========================
+with DAG(
+    dag_id=DAG_ID,
+    default_args=default_args,
+    start_date=datetime.datetime(2026, 2, 1),
+    schedule="0 7 * * *",   # каждый день в 07:00
+    catchup=False,
+    max_active_runs=1,
+    tags=["informatica", "monitoring", "telegram"],
+) as dag:
+
+    wait = PythonSensor(
+        task_id="wait_workflow_done",
+        python_callable=wait_wf_done,
+        poke_interval=POKE_INTERVAL,
+        timeout=TIMEOUT,
+        mode="reschedule",
+        on_failure_callback=[TelegramErrorNotification()],
+    )
+
+    notify = PythonOperator(
+        task_id="send_final_status",
+        python_callable=send_telegram,
+        on_failure_callback=[TelegramErrorNotification()],
+    )
+
+    wait >> notify

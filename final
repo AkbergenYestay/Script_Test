@@ -5,7 +5,10 @@ WITH last_run AS (
         r.start_time,
         r.end_time,
         r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+        ROW_NUMBER() OVER (
+            PARTITION BY r.workflow_id
+            ORDER BY r.start_time DESC
+        ) rn
     FROM RB_REP.OPB_WFLOW_RUN r
     WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
 ),
@@ -13,7 +16,6 @@ wf_today AS (
     SELECT
         wf.workflow_id,
         wf.workflow_name,
-        /* <<<PUT_LAST_SAVED_HERE>>> */        AS last_update_time,
         wf.scheduler_id,
         lr.workflow_run_id,
         lr.start_time AS run_start_time,
@@ -25,25 +27,29 @@ wf_today AS (
        AND lr.rn = 1
 )
 SELECT
-    t.workflow_name AS workflow_name,
-    t.run_start_time AS run_start_time,
-    t.last_update_time AS last_update_time,
+    t.workflow_name                                       AS workflow_name,
+    t.run_start_time                                      AS run_start_time,
 
+    /* дата последнего изменения — по scheduler */
+    TO_DATE(s.last_saved, 'MM/DD/YYYY/HH24/MI')           AS last_update_time,
+
+    /* плановое время запуска */
     TO_CHAR(
         TO_DATE(s.start_time, 'MM/DD/YYYY/HH24/MI'),
         'HH24:MI'
-    ) AS wf_sched_time,
+    )                                                     AS wf_sched_time,
 
     CASE
         WHEN t.workflow_run_id IS NULL THEN 'NOT STARTED'
         WHEN t.run_end_time IS NULL THEN 'RUNNING'
         WHEN NVL(t.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
-    END AS wf_status
+    END                                                   AS wf_status
 
 FROM wf_today t
 LEFT JOIN RB_REP.OPB_SCHEDULER s
     ON s.scheduler_id = t.scheduler_id
+
 ORDER BY
     t.run_start_time DESC NULLS LAST,
     LOWER(t.workflow_name);

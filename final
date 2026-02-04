@@ -1,87 +1,58 @@
 /* ==========================================================
-   RB_REP: WORKFLOW INFO AS IN IMAGE (WF-level)
-   - workflow_name
-   - run start time (last run today)
-   - last saved (last update)
-   - source / period / target / comment extracted from wf.description
+   RB_REP — WORKFLOW INFO (как в Excel)
    ========================================================== */
 
-WITH wf_base AS (
-    SELECT
-        wf.workflow_id,
-        wf.workflow_name,
-        wf.last_saved,
-        wf.scheduler_id,
-        -- В большинстве репо есть DESCRIPTION (или COMMENTS). Оставляю оба, чтобы не падало:
-        COALESCE(wf.description, wf.comments, '') AS wf_text
-    FROM RB_REP.OPB_WORKFLOW wf
-),
-last_run AS (
+WITH last_run AS (
     SELECT
         r.workflow_id,
         r.workflow_run_id,
         r.start_time,
         r.end_time,
         r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+        ROW_NUMBER() OVER (
+            PARTITION BY r.workflow_id
+            ORDER BY r.start_time DESC
+        ) rn
     FROM RB_REP.OPB_WFLOW_RUN r
     WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
 ),
 wf_today AS (
     SELECT
-        b.workflow_id,
-        b.workflow_name,
+        wf.workflow_id,
+        wf.workflow_name,
+        wf.last_saved,
+        wf.scheduler_id,
         lr.workflow_run_id,
         lr.start_time AS run_start_time,
         lr.end_time   AS run_end_time,
-        lr.run_err_code,
-        b.last_saved,
-        b.scheduler_id,
-        b.wf_text
-    FROM wf_base b
+        lr.run_err_code
+    FROM RB_REP.OPB_WORKFLOW wf
     LEFT JOIN last_run lr
-        ON lr.workflow_id = b.workflow_id
+        ON lr.workflow_id = wf.workflow_id
        AND lr.rn = 1
 )
 SELECT
-    t.workflow_name                                                AS "Наименование workflow",
-    t.run_start_time                                               AS "Дата запуска",
-    t.last_saved                                                   AS "Дата последнего изменения",
+    t.workflow_name                                            AS workflow_name,
+    t.run_start_time                                           AS run_start_time,
+    t.last_saved                                               AS last_update_time,
 
-    /* --------- Источник выгрузки данных (пытаемся вытащить из текста) --------- */
-    TRIM(REGEXP_SUBSTR(t.wf_text, '(SOURCE|SRC)\s*[:=]\s*([^;,\n\r]+)', 1, 1, 'i', 2))
-                                                                   AS "Источник выгрузки данных",
+    /* плановое время запуска из scheduler */
+    TO_CHAR(
+        TO_DATE(s.start_time, 'MM/DD/YYYY/HH24/MI'),
+        'HH24:MI'
+    )                                                          AS wf_sched_time,
 
-    /* --------- Период выгрузки --------- */
-    TRIM(REGEXP_SUBSTR(t.wf_text, '(PERIOD|RANGE|WINDOW)\s*[:=]\s*([^;,\n\r]+)', 1, 1, 'i', 2))
-                                                                   AS "Период выгрузки",
-
-    /* --------- Целевая витрина/таблица --------- */
-    TRIM(REGEXP_SUBSTR(t.wf_text, '(TARGET|TGT)\s*[:=]\s*([^;,\n\r]+)', 1, 1, 'i', 2))
-                                                                   AS "Целевая таблица/витрина",
-
-    /* --------- Примечание --------- */
-    NULLIF(TRIM(REGEXP_SUBSTR(t.wf_text, '(COMMENT|NOTE|INFO)\s*[:=]\s*([^;,\n\r]+)', 1, 1, 'i', 2)), '')
-                                                                   AS "Примечание",
-
-    /* --------- Дополнительно (удобно для мониторинга, но можешь убрать) --------- */
+    /* статус workflow */
     CASE
         WHEN t.workflow_run_id IS NULL THEN 'NOT STARTED'
         WHEN t.run_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(t.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        WHEN NVL(t.run_err_code, 0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
-    END                                                            AS "Статус сегодня",
-
-    /* плановое время (если есть scheduler) */
-    TO_CHAR(TO_DATE(s.start_time, 'mm.dd.yyyy HH24:MI:SS'), 'HH24:MI:SS') AS "WF_SCHEDTIME"
+    END                                                        AS wf_status
 
 FROM wf_today t
 LEFT JOIN RB_REP.OPB_SCHEDULER s
     ON s.scheduler_id = t.scheduler_id
-
-WHERE 1=1
-  -- фильтр под твои WF (можешь оставить пустым или включить)
-  -- AND LOWER(t.workflow_name) LIKE 'wf_%'
 
 ORDER BY
     t.run_start_time DESC NULLS LAST,

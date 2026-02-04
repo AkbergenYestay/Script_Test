@@ -5,41 +5,63 @@ from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.sensors.python import PythonSensor
 from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.utils.email import send_email
 from airflow.models import Variable
 
 from source.telegram_topic_notifier import TelegramTopicNotifier
 from source.telegram_notifications import TelegramErrorNotification
 
+DAG_ID = "dm_incall_centersegmentation_send_notifications"
+ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
+
+WORKFLOW_ID = 4726
+WORKFLOW_NAME_FALLBACK = "wf_dm_incall_centersegmentation_edw"
+
+TOTAL_TASKS = 20
+SENT_VAR = f"{DAG_ID}_sent_date"
+
+POKE_INTERVAL = 600          # 10 минут
+TIMEOUT = 6 * 60 * 60        # 6 часов (с 07:00 до 13:00)
 
 default_args = {
     "owner": "Yestay",
-    "email": [
-        "EstayA@halykbank.kz",  # "AdiletAl@halykbank.kz", "ALMASA@halykbank.kz",
-    ],
+    "email": ["EstayA@halykbank.kz"],
     "email_on_failure": True,
     "depends_on_past": False,
 }
 
-# ====== настройки "по мере готовности" ======
-SENT_VAR_PREFIX = "pfm_acc_dep_openway_email_sent"
-
-NEED = [
-    {"workflow_id": 8661, "task_id": 8663},  # wf_PROD_edw_to_operations_account
-    {"workflow_id": 8671, "task_id": 8679},  # wf_PROD_edw_to_operations_deposit
-    {"workflow_id": 8690, "task_id": 8696},  # wf_PROD_edw_to_operations_openway
+NEED_TASK_IDS = [
+    4731,  # s_MP_INCORRECT_PINCODE
+    4737,  # s_MP_DEPOSIT_SEGMENT
+    4740,  # s_MP_CARD_BLOCK
+    4738,  # s_MP_ACTIVITY_SEGMENTATION
+    4736,  # s_M_TO_DSSB_RETIREES_DETAILED
+    4739,  # s_MP_SERVICE_CHAN_SEGMENT
+    4778,  # s_MP_LOST_CARDS
+    4746,  # s_MP_CALL_CENTER_SERVICE
+    4727,  # s_MP_LOAN_HALYK_SEGMENT
+    4735,  # s_MP_LOANTYPE_SEGMENT
+    4745,  # s_MP_ATM_SERVICE_SEGMENTATION
+    4728,  # s_M_COMMUNICATION_LAST_7_DAYS
+    4743,  # s_MP_DM_INCALL_CENTERSEGMENTATION
+    4733,  # s_MP_LOAN_NUM_SEGMENT
+    4742,  # s_MP_DM_INCALL_CENTERSEGMENTATION_NEW
+    4741,  # s_MP_SERVICES_SEGMENTATION
+    4747,  # s_MP_ONLINE_TRANSACTION_SEGMENTATION
+    4744,  # s_MP_PERSON_INDIVIDUAL_SEGMENTATION
+    4732,  # s_MP_BENEFIT_SEGMENT
+    4730,  # s_MP_POS_HOMEBANK_SEGMENTATION
 ]
 
-SQL_MONITOR_WF_TASK_BY_ID = """
+def _need_union_sql() -> str:
+    parts = []
+    for tid in NEED_TASK_IDS:
+        parts.append(f"SELECT {WORKFLOW_ID} AS workflow_id, {int(tid)} AS task_id FROM dual")
+    return "\nUNION ALL\n".join(parts)
+
+
+SQL_CHECK = """
 WITH need AS (
-    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
-    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
-
-    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
-    SELECT 8671, 8679 FROM dual UNION ALL
-
-    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
-    SELECT 8690, 8696 FROM dual
+    {need_union}
 ),
 last_wf_run AS (
     SELECT
@@ -51,43 +73,36 @@ last_wf_run AS (
         r.run_err_code,
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
-      AND r.workflow_id IN (SELECT workflow_id FROM need)
-),
-ins_rows AS (
-    SELECT
-        s.workflow_run_id,
-        MAX(s.affected_rows) AS inserted_rows
-    FROM RB_REP.OPB_SWIDGINST_LOG s
-    GROUP BY s.workflow_run_id
+    WHERE r.workflow_id = {workflow_id}
+      AND r.start_time >= TRUNC(SYSDATE) - 1
+      AND r.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
 ),
 last_task_run AS (
     SELECT
         tr.workflow_run_id,
-        tr.instance_id,
-        tr.instance_name,
         tr.task_id,
+        tr.instance_name,
         tr.start_time AS task_start_time,
-
-        CASE
-            WHEN tr.end_time IS NULL THEN NULL
-            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
-            WHEN tr.end_time > SYSDATE THEN NULL
-            ELSE tr.end_time
-        END AS task_end_time,
-
+        tr.end_time   AS task_end_time,
         tr.run_err_code AS task_run_err_code,
         ROW_NUMBER() OVER (
-            PARTITION BY tr.workflow_run_id, tr.instance_id
+            PARTITION BY tr.workflow_run_id, tr.task_id
             ORDER BY tr.start_time DESC
         ) rn
     FROM RB_REP.OPB_TASK_INST_RUN tr
-    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
-      AND tr.task_id IN (SELECT task_id FROM need)
+    JOIN last_wf_run w
+      ON w.workflow_run_id = tr.workflow_run_id
+     AND w.rn = 1
+    JOIN need n
+      ON n.task_id = tr.task_id
+     AND n.workflow_id = w.workflow_id
+    WHERE tr.start_time >= TRUNC(SYSDATE) - 1
+      AND tr.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
+      AND LOWER(tr.instance_name) NOT LIKE '%sys_dependency%'
 )
 SELECT
-    w.workflow_name,
     w.workflow_id,
+    NVL(w.workflow_name, '{wf_name_fallback}') AS workflow_name,
     w.workflow_run_id,
     w.wf_start_time,
     w.wf_end_time,
@@ -97,235 +112,145 @@ SELECT
         WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
     END AS wf_status,
-    NVL(ir.inserted_rows, 0) AS inserted_rows,
 
-    n.task_id,
-    tr.task_start_time,
-    tr.task_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
-        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
-        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
-        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
-        ELSE 'TASK SUCCESS'
-    END AS task_status
-FROM need n
-LEFT JOIN last_wf_run w
-    ON w.workflow_id = n.workflow_id
-   AND w.rn = 1
-LEFT JOIN ins_rows ir
-    ON ir.workflow_run_id = w.workflow_run_id
-LEFT JOIN last_task_run tr
-    ON tr.workflow_run_id = w.workflow_run_id
-   AND tr.task_id = n.task_id
-   AND tr.rn = 1
-ORDER BY n.workflow_id
+    COUNT(n.task_id) AS total_tasks,
+    SUM(CASE WHEN t.task_end_time IS NOT NULL THEN 1 ELSE 0 END) AS finished_tasks,
+    SUM(CASE WHEN NVL(t.task_run_err_code,0) <> 0 THEN 1 ELSE 0 END) AS error_tasks
+FROM last_wf_run w
+JOIN need n
+  ON n.workflow_id = w.workflow_id
+LEFT JOIN last_task_run t
+  ON t.workflow_run_id = w.workflow_run_id
+ AND t.task_id = n.task_id
+ AND t.rn = 1
+WHERE w.rn = 1
+GROUP BY
+    w.workflow_id,
+    w.workflow_name,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    w.run_err_code
 """
 
 
-def _fmt_int_spaces(v) -> str:
-    try:
-        return f"{int(v):,}".replace(",", " ")
-    except Exception:
-        return "0"
+def fetch_df() -> pd.DataFrame:
+    sql = SQL_CHECK.format(
+        need_union=_need_union_sql(),
+        workflow_id=WORKFLOW_ID,
+        wf_name_fallback=WORKFLOW_NAME_FALLBACK,
+    )
 
-
-def _fetch_df() -> pd.DataFrame:
-    oracle_hook = OracleHook(oracle_conn_id="db_oracle_ipc__edw_ipc", thick_mode=True)
-    conn = oracle_hook.get_conn()
+    hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
+    conn = hook.get_conn()
     try:
-        with conn.cursor() as cursor:
-            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
-            rows = cursor.fetchall()
-            cols = [c[0] for c in cursor.description]
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            cols = [c[0].upper() for c in cur.description]
     finally:
         conn.close()
+
     return pd.DataFrame(rows, columns=cols)
 
 
-def _sent_key(workflow_id: int) -> str:
-    return f"{SENT_VAR_PREFIX}_{workflow_id}"
-
-
-def _row_for_workflow(df: pd.DataFrame, workflow_id: int) -> pd.DataFrame:
-    if df.empty:
-        return df
-    return df[df["WORKFLOW_ID"] == workflow_id].copy()
-
-
-def wait_one_done(workflow_id: int, task_id: int, **context) -> bool:
+def wait_workflow_done(**context) -> bool:
     today = datetime.date.today().isoformat()
-    sent_var = _sent_key(workflow_id)
-    last_sent = Variable.get(sent_var, default_var="1970-01-01")
-    print(f"[INFO] wait_one_done wf={workflow_id} task={task_id} today={today} last_sent={last_sent}")
-
-    # Уже отправляли сегодня по этому workflow
-    if last_sent == today:
-        print("[INFO] Already sent today for this workflow. Sensor succeeds.")
+    if Variable.get(SENT_VAR, default_var="") == today:
+        print("[INFO] Already sent today.")
         return True
 
-    df = _fetch_df()
+    df = fetch_df()
     if df.empty:
-        print("[INFO] No rows yet. Waiting...")
         return False
 
-    one = _row_for_workflow(df, workflow_id)
-    if one.empty:
-        print("[INFO] No row for this workflow yet. Waiting...")
-        return False
+    r = df.iloc[0]
+    finished = int(r["FINISHED_TASKS"] or 0)
+    total = int(r["TOTAL_TASKS"] or 0)
+    print(f"[INFO] WF={r['WORKFLOW_NAME']} status={r['WF_STATUS']} progress={finished}/{total}")
 
-    r = one.iloc[0]
-
-    # Готовность именно этой загрузки
-    not_ready = (
-        pd.isna(r["WORKFLOW_RUN_ID"])
-        or pd.isna(r["WF_END_TIME"])
-        or pd.isna(r["TASK_END_TIME"])
-    )
-
-    if not_ready:
-        print("[INFO] This workflow/task not finished yet. Waiting...")
-        return False
-
-    print("[INFO] This workflow/task finished. Sensor succeeds.")
-    return True
+    return finished >= total and total == len(NEED_TASK_IDS)
 
 
-def _send_telegram_status_one(row: pd.Series, today: str, has_errors: bool, **context) -> None:
+def _send_telegram_message(text: str, **context) -> None:
     bot_token = context["var"]["value"].get("telegram_bot_token")
     chat_id = context["var"]["value"].get("new_notifications_chat_id")
     topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
-    http_proxy = context["var"]["value"].get("http_proxy")
-    https_proxy = context["var"]["value"].get("https_proxy")
-
-    proxies = {}
-    if http_proxy:
-        proxies["http"] = http_proxy
-    if https_proxy:
-        proxies["https"] = https_proxy
 
     if not bot_token or not chat_id or not topic_id:
-        print("[WARN] Telegram vars are not set fully (bot_token/chat_id/topic_id). Skipping telegram.")
         return
 
-    try:
-        topic_id = int(topic_id) 
-    except Exception as e:
-        print(f"[ERROR] topic_id must be int, got={topic_id}. Error: {e}")
-        return
-
-    notifier = TelegramTopicNotifier(bot_token=bot_token, chat_id=chat_id, topic_id=topic_id)
-
-    header = f"✅ <b>{row['WORKFLOW_NAME']}</b> - статус загрузки PFM"
-    if has_errors:
-        header = f"❌ <b>{row['WORKFLOW_NAME']}</b> — ОШИБКА/ПРЕДУПРЕЖДЕНИЕ"
-
-    message = (
-        f"{header}\n"
-        f"<b>Дата:</b> {today}\n\n"
-        f"Старт: {row['WF_START_TIME']}\n"
-        f"Завершение: {row['WF_END_TIME']}\n"
-        f"Статус WF: <b>{row['WF_STATUS']}</b>\n"
-        f"Статус TASK: <b>{row['TASK_STATUS']}</b>\n"
-        f"Количество записей: <b>{_fmt_int_spaces(row['INSERTED_ROWS'])}</b>\n"
+    notifier = TelegramTopicNotifier(
+        bot_token=bot_token,
+        chat_id=chat_id,
+        topic_id=int(topic_id),
     )
-
-    print("[INFO] Sending telegram message (one workflow)...")
-    try:
-        resp = notifier.send_message(message, proxies if proxies else None)
-        print(f"[INFO] TG response: {getattr(resp, 'status_code', resp)}")
-        if hasattr(resp, "text"):
-            print(f"[INFO] TG response text: {resp.text}")
-    except Exception as e:
-        print(f"[ERROR] Telegram send failed: {e}")
+    notifier.send_message(text)
 
 
-def send_one_notification(workflow_id: int, **context) -> None:
+def send_final_status(**context) -> None:
     today = datetime.date.today().isoformat()
-    sent_var = _sent_key(workflow_id)
-    last_sent = Variable.get(sent_var, default_var="1970-01-01")
-    print(f"[INFO] send_one_notification wf={workflow_id} today={today} last_sent={last_sent}")
-
-    if last_sent == today:
-        print("[INFO] Already sent today for this workflow. Skipping.")
+    if Variable.get(SENT_VAR, default_var="") == today:
+        print("[INFO] Already sent today.")
         return
 
-    df = _fetch_df()
-    one = _row_for_workflow(df, workflow_id)
-    if one.empty:
-        print("[WARN] No row for workflow; skipping.")
+    df = fetch_df()
+    if df.empty:
+        print("[WARN] No data.")
         return
 
-    r = one.iloc[0]
+    r = df.iloc[0]
+    wf_name = r["WORKFLOW_NAME"]
+    wf_start = r["WF_START_TIME"]
+    wf_end = r["WF_END_TIME"]
+    wf_status = r["WF_STATUS"]
 
-    not_ready = (
-        pd.isna(r["WORKFLOW_RUN_ID"])
-        or pd.isna(r["WF_END_TIME"])
-        or pd.isna(r["TASK_END_TIME"])
-    )
-    if not_ready:
-        print("[WARN] This workflow not finished yet; skipping.")
-        return
+    finished = int(r["FINISHED_TASKS"] or 0)
+    total = int(r["TOTAL_TASKS"] or 0)
+    errors = int(r["ERROR_TASKS"] or 0)
 
-    has_errors = (r["WF_STATUS"] == "ERROR/WARNING") or (r["TASK_STATUS"] == "TASK ERROR/WARNING")
+    has_errors = (wf_status == "ERROR/WARNING") or (errors > 0)
+    icon = "✅" if not has_errors else "❌"
 
-    subject = f"✅ {r['WORKFLOW_NAME']} — статус загрузки PFM"
-    if has_errors:
-        subject = f"❌ {r['WORKFLOW_NAME']} — ОШИБКА в загрузке"
-
-    html = (
-        f"<b>Дата:</b> {today}<br><br>"
-        f"<b>{r['WORKFLOW_NAME']}</b><br>"
-        f"Старт: {r['WF_START_TIME']}<br>"
-        f"Завершение: {r['WF_END_TIME']}<br>"
-        f"Статус WF: {r['WF_STATUS']}<br>"
-        f"Статус TASK: {r['TASK_STATUS']}<br>"
-        f"Количество записей: {_fmt_int_spaces(r['INSERTED_ROWS'])}<br><br>"
+    msg = (
+        f"{icon} <b>{wf_name}</b>\n\n"
+        f"<b>Дата:</b> {today}\n\n"
+        f"WF start: {wf_start}\n"
+        f"WF end:   {wf_end}\n"
+        f"WF status: <b>{wf_status}</b>\n\n"
+        f"<b>Task:</b> выполнено <b>{finished}</b> из <b>{total}</b>\n"
+        f"<b>Ошибок:</b> {errors}"
     )
 
-    print("[INFO] Sending email (one workflow)...")
-    send_email(
-        to=default_args["email"],
-        subject=subject,
-        html_content=html,
-    )
-    print("[INFO] Email sent.")
+    _send_telegram_message(msg, **context)
 
-    _send_telegram_status_one(row=r, today=today, has_errors=has_errors, **context)
-
-    Variable.set(sent_var, today)
-    print(f"[INFO] Notification sent. Variable {sent_var} set to {today}")
+    Variable.set(SENT_VAR, today)
+    print(f"[INFO] Sent. Variable {SENT_VAR} set to {today}")
 
 
 with DAG(
-    dag_id="pfm_acc_dep_openway_send_notifications",
+    dag_id=DAG_ID,
     default_args=default_args,
-    start_date=datetime.datetime(2026, 1, 22),
-    schedule="0 9 * * *",
+    start_date=datetime.datetime(2026, 2, 1),
+    schedule="0 7 * * *",   
     catchup=False,
-    tags=["pfm"],
     max_active_runs=1,
+    tags=["informatica", "telegram"],
 ) as dag:
 
-    for item in NEED:
-        wf_id = item["workflow_id"]
-        task_id = item["task_id"]
+    wait = PythonSensor(
+        task_id="wait_wf_4726_all_tasks_done",
+        python_callable=wait_workflow_done,
+        poke_interval=POKE_INTERVAL,
+        timeout=TIMEOUT,
+        mode="reschedule",
+        on_failure_callback=[TelegramErrorNotification()],
+    )
 
-        wait = PythonSensor(
-            task_id=f"wait_wf_{wf_id}_done",
-            python_callable=wait_one_done,
-            op_kwargs={"workflow_id": wf_id, "task_id": task_id},
-            mode="reschedule",
-            poke_interval=600,          # 10 минут
-            timeout=16 * 60 * 60,       # 16 часов
-            on_failure_callback=[TelegramErrorNotification()],
-        )
+    notify = PythonOperator(
+        task_id="notify_wf_4726_status",
+        python_callable=send_final_status,
+        on_failure_callback=[TelegramErrorNotification()],
+    )
 
-        notify = PythonOperator(
-            task_id=f"notify_wf_{wf_id}",
-            python_callable=send_one_notification,
-            op_kwargs={"workflow_id": wf_id},
-            on_failure_callback=[TelegramErrorNotification()],
-        )
-
-        wait >> notify
+    wait >> notify

@@ -5,10 +5,7 @@ WITH last_run AS (
         r.start_time,
         r.end_time,
         r.run_err_code,
-        ROW_NUMBER() OVER (
-            PARTITION BY r.workflow_id
-            ORDER BY r.start_time DESC
-        ) rn
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
     WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
 ),
@@ -16,41 +13,37 @@ wf_today AS (
     SELECT
         wf.workflow_id,
         wf.workflow_name,
-        meta.last_saved,              -- ← ВОТ ОТСЮДА
+        /* <<<PUT_LAST_SAVED_HERE>>> */        AS last_update_time,
         wf.scheduler_id,
         lr.workflow_run_id,
         lr.start_time AS run_start_time,
         lr.end_time   AS run_end_time,
         lr.run_err_code
     FROM RB_REP.OPB_WORKFLOW wf
-    JOIN RB_REP.OPB_WFLOW meta          -- ← МЕТАДАННЫЕ WF
-        ON meta.workflow_id = wf.workflow_id
     LEFT JOIN last_run lr
         ON lr.workflow_id = wf.workflow_id
        AND lr.rn = 1
 )
 SELECT
-    t.workflow_name                               AS workflow_name,
-    t.run_start_time                              AS run_start_time,
-    t.last_saved                                  AS last_update_time,
+    t.workflow_name AS workflow_name,
+    t.run_start_time AS run_start_time,
+    t.last_update_time AS last_update_time,
 
-    /* плановое время запуска из scheduler */
     TO_CHAR(
         TO_DATE(s.start_time, 'MM/DD/YYYY/HH24/MI'),
         'HH24:MI'
-    )                                             AS wf_sched_time,
+    ) AS wf_sched_time,
 
     CASE
         WHEN t.workflow_run_id IS NULL THEN 'NOT STARTED'
         WHEN t.run_end_time IS NULL THEN 'RUNNING'
         WHEN NVL(t.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
         ELSE 'SUCCESS'
-    END                                           AS wf_status
+    END AS wf_status
 
 FROM wf_today t
 LEFT JOIN RB_REP.OPB_SCHEDULER s
     ON s.scheduler_id = t.scheduler_id
-
 ORDER BY
     t.run_start_time DESC NULLS LAST,
     LOWER(t.workflow_name);

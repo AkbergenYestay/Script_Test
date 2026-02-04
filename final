@@ -10,11 +10,7 @@ from airflow.models import Variable
 from source.telegram_topic_notifier import TelegramTopicNotifier
 from source.telegram_notifications import TelegramErrorNotification
 
-
-# ==========================
-# НАСТРОЙКИ
-# ==========================
-DAG_ID = "wf_4726_incall_centersegmentation_check_7am"
+DAG_ID = "dm_incall_centersegmentation_send_notifications"
 ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
 
 WORKFLOW_ID = 4726
@@ -33,9 +29,6 @@ default_args = {
     "depends_on_past": False,
 }
 
-# ==========================
-# 20 TASK_ID (имена — комментарии)
-# ==========================
 NEED_TASK_IDS = [
     4731,  # s_MP_INCORRECT_PINCODE
     4737,  # s_MP_DEPOSIT_SEGMENT
@@ -56,12 +49,8 @@ NEED_TASK_IDS = [
     4747,  # s_MP_ONLINE_TRANSACTION_SEGMENTATION
     4744,  # s_MP_PERSON_INDIVIDUAL_SEGMENTATION
     4732,  # s_MP_BENEFIT_SEGMENT
+    4730,  # s_MP_POS_HOMEBANK_SEGMENTATION
 ]
-
-# ВАЖНО: у тебя было "20 из 20", но в списке с картинки 19 id.
-# Добавь 20-й task_id сюда, иначе ожидание 20/20 никогда не выполнится.
-# Например:
-# NEED_TASK_IDS.append(XXXX)  # <--- 20-й таск
 
 
 def _need_union_sql() -> str:
@@ -86,6 +75,7 @@ last_wf_run AS (
         ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
     FROM RB_REP.OPB_WFLOW_RUN r
     WHERE r.workflow_id = {workflow_id}
+      -- WF стартует ночью (~00:30), DAG проверяет в 07:00 => берём окно "ночь->утро"
       AND r.start_time >= TRUNC(SYSDATE) - 1
       AND r.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
 ),
@@ -169,12 +159,12 @@ def fetch_df() -> pd.DataFrame:
 def wait_workflow_done(**context) -> bool:
     today = datetime.date.today().isoformat()
     if Variable.get(SENT_VAR, default_var="") == today:
-        print("[INFO] Already sent today -> sensor success.")
+        print("[INFO] Already sent today.")
         return True
 
     df = fetch_df()
     if df.empty:
-        print("[INFO] No WF run found yet in window -> waiting.")
+        print("[INFO] No WF run found in window yet. Waiting...")
         return False
 
     r = df.iloc[0]
@@ -182,7 +172,7 @@ def wait_workflow_done(**context) -> bool:
     total = int(r["TOTAL_TASKS"] or 0)
     print(f"[INFO] WF={r['WORKFLOW_NAME']} status={r['WF_STATUS']} progress={finished}/{total}")
 
-    # ждать пока завершатся все таски из NEED
+    # Ждём пока завершатся все task_id из NEED_TASK_IDS
     return finished >= total and total == len(NEED_TASK_IDS)
 
 
@@ -191,27 +181,44 @@ def _send_telegram_message(text: str, **context) -> None:
     chat_id = context["var"]["value"].get("new_notifications_chat_id")
     topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
 
+    http_proxy = context["var"]["value"].get("http_proxy")
+    https_proxy = context["var"]["value"].get("https_proxy")
+
+    proxies = {}
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+
     if not bot_token or not chat_id or not topic_id:
-        print("[WARN] Telegram vars not set fully. Skip telegram.")
+        print("[WARN] Telegram vars not set fully (bot_token/chat_id/topic_id). Skip telegram.")
+        return
+
+    try:
+        topic_id = int(topic_id)
+    except Exception as e:
+        print(f"[ERROR] topic_id must be int, got={topic_id}. Error: {e}")
         return
 
     notifier = TelegramTopicNotifier(
         bot_token=bot_token,
         chat_id=chat_id,
-        topic_id=int(topic_id),
+        topic_id=topic_id,
     )
-    notifier.send_message(text)
+
+    # ВАЖНО: send_message требует proxies вторым аргументом
+    notifier.send_message(text, proxies if proxies else None)
 
 
 def send_final_status(**context) -> None:
     today = datetime.date.today().isoformat()
     if Variable.get(SENT_VAR, default_var="") == today:
-        print("[INFO] Already sent today -> skip notify.")
+        print("[INFO] Already sent today.")
         return
 
     df = fetch_df()
     if df.empty:
-        print("[WARN] No data -> skip notify.")
+        print("[WARN] No data.")
         return
 
     r = df.iloc[0]
@@ -233,7 +240,7 @@ def send_final_status(**context) -> None:
         f"WF start: {wf_start}\n"
         f"WF end:   {wf_end}\n"
         f"WF status: <b>{wf_status}</b>\n\n"
-        f"<b>Задачи:</b> выполнено <b>{finished}</b> из <b>{total}</b>\n"
+        f"<b>Task:</b> выполнено <b>{finished}</b> из <b>{total}</b>\n"
         f"<b>Ошибок:</b> {errors}"
     )
 
@@ -247,10 +254,10 @@ with DAG(
     dag_id=DAG_ID,
     default_args=default_args,
     start_date=datetime.datetime(2026, 2, 1),
-    schedule="0 7 * * *",  # DAG проверяет в 07:00
+    schedule="0 7 * * *",   # проверка ежедневно в 07:00
     catchup=False,
     max_active_runs=1,
-    tags=["informatica", "monitoring", "telegram"],
+    tags=["informatica", "telegram"],
 ) as dag:
 
     wait = PythonSensor(

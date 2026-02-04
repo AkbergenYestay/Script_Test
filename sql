@@ -1,20 +1,54 @@
-s_MP_INCORRECT_PINCODE	4731
-s_MP_DEPOSIT_SEGMENT	4737
-s_MP_CARD_BLOCK	4740
-s_MP_ACTIVITY_SEGMENTATION	4738
-s_M_TO_DSSB_RETIREES_DETAILED	4736
-s_MP_SERVICE_CHAN_SEGMENT	4739
-s_MP_LOST_CARDS	4778
-s_MP_CALL_CENTER_SERVICE	4746
-s_MP_LOAN_HALYK_SEGMENT	4727
-s_MP_LOANTYPE_SEGMENT	4735
-s_MP_ATM_SERVICE_SEGMENTATION	4745
-s_M_COMMUNICATION_LAST_7_DAYS	4728
-s_MP_DM_INCALL_CENTERSEGMENTATION_FINAL	4743
-s_MP_LOAN_NUM_SEGMENT	4733
-s_MP_DM_INCALL_CENTERSEGMENTATION_NEW	4742
-s_MP_SERVICES_SEGMENTATION	4741
-s_MP_ONLINE_TRANSACTION_SEGMENTATION	4747
-s_MP_PERSON_INDIVIDUAL_SEGMENTATION	4744
-s_MP_BENEFIT_SEGMENT	4732
-s_MP_POS_HOMEBANK_SEGMENTATION	4730
+/* =========================================
+   INFORMATICA REPOSITORY (rb_rep)
+   WORKFLOW → SESSION → MAPPING → SRC → TGT
+   ========================================= */
+
+SELECT
+    subj.subject_name                         AS folder_name,
+    wf.workflow_name                          AS workflow_name,
+    wf.is_valid                               AS wf_valid,
+    wf.last_saved                             AS wf_last_saved,
+
+    ti.task_instance_name                     AS session_name,
+    t.task_type                               AS task_type,
+
+    mp.mapping_name                           AS mapping_name,
+
+    src.src_name                              AS source_name,
+    src.dbd_name                              AS source_dbd,
+
+    tgt.tgt_name                              AS target_name,
+    tgt.dbd_name                              AS target_dbd
+
+FROM opb_subject subj
+
+JOIN opb_wflow wf
+  ON wf.subject_id = subj.subject_id
+
+JOIN opb_task_inst ti
+  ON ti.workflow_id = wf.workflow_id
+
+JOIN opb_task t
+  ON t.task_id = ti.task_id
+ AND t.task_type = 'SESSION'
+
+LEFT JOIN opb_mapping mp
+  ON mp.mapping_id = t.mapping_id
+
+LEFT JOIN opb_mapping_src mps
+  ON mps.mapping_id = mp.mapping_id
+LEFT JOIN opb_src src
+  ON src.src_id = mps.src_id
+
+LEFT JOIN opb_mapping_targ mpt
+  ON mpt.mapping_id = mp.mapping_id
+LEFT JOIN opb_targ tgt
+  ON tgt.targ_id = mpt.targ_id
+
+WHERE subj.subject_name = 'RB_REP'
+-- AND wf.workflow_name LIKE 'WF_%'
+
+ORDER BY
+    subj.subject_name,
+    wf.workflow_name,
+    ti.task_instance_name;

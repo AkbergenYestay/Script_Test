@@ -1,32 +1,69 @@
-ece2221df1b4
+6dbf0ab60a2b
 *** Found local files:
-***   * /opt/airflow/logs/dag_id=dm_incall_centersegmentation_send_notifications/run_id=scheduled__2026-02-03T02:00:00+00:00/task_id=notify_wf_4726_status/attempt=1.log
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1159} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: dm_incall_centersegmentation_send_notifications.notify_wf_4726_status scheduled__2026-02-03T02:00:00+00:00 [queued]>
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1159} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: dm_incall_centersegmentation_send_notifications.notify_wf_4726_status scheduled__2026-02-03T02:00:00+00:00 [queued]>
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1361} INFO - Starting attempt 1 of 1
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1382} INFO - Executing <Task(PythonOperator): notify_wf_4726_status> on 2026-02-03 02:00:00+00:00
-[2026-02-04, 11:36:06 +05] {standard_task_runner.py:57} INFO - Started process 583053 to run task
-[2026-02-04, 11:36:06 +05] {standard_task_runner.py:84} INFO - Running: ['airflow', 'tasks', 'run', 'dm_incall_centersegmentation_send_notifications', 'notify_wf_4726_status', 'scheduled__2026-02-03T02:00:00+00:00', '--job-id', '1595733', '--raw', '--subdir', 'DAGS_FOLDER/dm_incall_centersegmentation_send_notifications.py', '--cfg-path', '/tmp/tmp62n0q9ys']
-[2026-02-04, 11:36:06 +05] {standard_task_runner.py:85} INFO - Job 1595733: Subtask notify_wf_4726_status
-[2026-02-04, 11:36:06 +05] {task_command.py:416} INFO - Running <TaskInstance: dm_incall_centersegmentation_send_notifications.notify_wf_4726_status scheduled__2026-02-03T02:00:00+00:00 [running]> on host ece2221df1b4
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1662} INFO - Exporting env vars: AIRFLOW_CTX_DAG_EMAIL='EstayA@halykbank.kz' AIRFLOW_CTX_DAG_OWNER='Yestay' AIRFLOW_CTX_DAG_ID='dm_incall_centersegmentation_send_notifications' AIRFLOW_CTX_TASK_ID='notify_wf_4726_status' AIRFLOW_CTX_EXECUTION_DATE='2026-02-03T02:00:00+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='scheduled__2026-02-03T02:00:00+00:00'
-[2026-02-04, 11:36:06 +05] {base.py:73} INFO - Using connection ID 'db_oracle_ipc__edw_ipc' for task execution.
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1937} ERROR - Task failed with exception
+***   * /opt/airflow/logs/dag_id=PFM_monitoring/run_id=manual__2026-02-12T12:07:11.154944+00:00/task_id=log_wf_8661_to_pg/attempt=1.log
+[2026-02-12, 17:07:15 +05] {taskinstance.py:1159} INFO - Dependencies all met for dep_context=non-requeueable deps ti=<TaskInstance: PFM_monitoring.log_wf_8661_to_pg manual__2026-02-12T12:07:11.154944+00:00 [queued]>
+[2026-02-12, 17:07:15 +05] {taskinstance.py:1159} INFO - Dependencies all met for dep_context=requeueable deps ti=<TaskInstance: PFM_monitoring.log_wf_8661_to_pg manual__2026-02-12T12:07:11.154944+00:00 [queued]>
+[2026-02-12, 17:07:15 +05] {taskinstance.py:1361} INFO - Starting attempt 1 of 1
+[2026-02-12, 17:07:15 +05] {taskinstance.py:1382} INFO - Executing <Task(PythonOperator): log_wf_8661_to_pg> on 2026-02-12 12:07:11.154944+00:00
+[2026-02-12, 17:07:15 +05] {standard_task_runner.py:57} INFO - Started process 2679703 to run task
+[2026-02-12, 17:07:15 +05] {standard_task_runner.py:84} INFO - Running: ['***', 'tasks', 'run', 'PFM_monitoring', 'log_wf_8661_to_pg', 'manual__2026-02-12T12:07:11.154944+00:00', '--job-id', '217499', '--raw', '--subdir', 'DAGS_FOLDER/PFM_monitoring.py', '--cfg-path', '/tmp/tmpkb2_met5']
+[2026-02-12, 17:07:15 +05] {standard_task_runner.py:85} INFO - Job 217499: Subtask log_wf_8661_to_pg
+[2026-02-12, 17:07:15 +05] {task_command.py:416} INFO - Running <TaskInstance: PFM_monitoring.log_wf_8661_to_pg manual__2026-02-12T12:07:11.154944+00:00 [running]> on host 6dbf0ab60a2b
+[2026-02-12, 17:07:15 +05] {taskinstance.py:1662} INFO - Exporting env vars: AIRFLOW_CTX_DAG_EMAIL='EstayA@halykbank.kz' AIRFLOW_CTX_DAG_OWNER='Yestay' AIRFLOW_CTX_DAG_ID='PFM_monitoring' AIRFLOW_CTX_TASK_ID='log_wf_8661_to_pg' AIRFLOW_CTX_EXECUTION_DATE='2026-02-12T12:07:11.154944+00:00' AIRFLOW_CTX_TRY_NUMBER='1' AIRFLOW_CTX_DAG_RUN_ID='manual__2026-02-12T12:07:11.154944+00:00'
+[2026-02-12, 17:07:15 +05] {logging_mixin.py:154} INFO - [INFO] write_one_log wf=8661 today=2026-02-12 last_sent=1970-01-01
+[2026-02-12, 17:07:15 +05] {base.py:73} INFO - Using connection ID 'db_oracle_ipc__edw_ipc' for task execution.
+[2026-02-12, 17:07:17 +05] {base.py:73} INFO - Using connection ID 'db_postgres_monitoring__wf_monitor' for task execution.
+[2026-02-12, 17:07:17 +05] {sql.py:418} INFO - Running statement: 
+        INSERT INTO public.pfm_etl_log (
+            workflow_id,
+            workflow_name,
+            mapping_name,
+            start_time,
+            end_time,
+            duration_min,
+            status,
+            source_count,
+            source_failed_rows,
+            target_inserted,
+            target_rejected_rows,
+            error_code,
+            error_msg,
+            created_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now())
+        ON CONFLICT (workflow_id, start_time)
+        DO UPDATE SET
+            workflow_name         = EXCLUDED.workflow_name,
+            mapping_name          = EXCLUDED.mapping_name,
+            end_time              = EXCLUDED.end_time,
+            duration_min          = EXCLUDED.duration_min,
+            status                = EXCLUDED.status,
+            source_count          = EXCLUDED.source_count,
+            source_failed_rows    = EXCLUDED.source_failed_rows,
+            target_inserted       = EXCLUDED.target_inserted,
+            target_rejected_rows  = EXCLUDED.target_rejected_rows,
+            error_code            = EXCLUDED.error_code,
+            error_msg             = EXCLUDED.error_msg
+        , parameters: (8661, 'wf_PROD_edw_to_operations_account', 'task_8663', Timestamp('2026-02-12 09:30:00'), Timestamp('2026-02-12 09:33:05'), 3, 'SUCCESS', 16632, 0, 16632, 0, 0, None)
+[2026-02-12, 17:07:17 +05] {taskinstance.py:1937} ERROR - Task failed with exception
 Traceback (most recent call last):
   File "/home/airflow/.local/lib/python3.8/site-packages/airflow/operators/python.py", line 192, in execute
     return_value = self.execute_callable()
   File "/home/airflow/.local/lib/python3.8/site-packages/airflow/operators/python.py", line 209, in execute_callable
     return self.python_callable(*self.op_args, **self.op_kwargs)
-  File "/opt/airflow/dags/dm_incall_centersegmentation_send_notifications.py", line 225, in send_final_status
-    _send_telegram_message(msg, **context)
-  File "/opt/airflow/dags/dm_incall_centersegmentation_send_notifications.py", line 188, in _send_telegram_message
-    notifier.send_message(text)
-TypeError: send_message() missing 1 required positional argument: 'proxies'
-[2026-02-04, 11:36:06 +05] {taskinstance.py:1400} INFO - Marking task as FAILED. dag_id=dm_incall_centersegmentation_send_notifications, task_id=notify_wf_4726_status, execution_date=20260203T020000, start_date=20260204T063606, end_date=20260204T063606
-[2026-02-04, 11:36:06 +05] {warnings.py:109} WARNING - /home/airflow/.local/lib/python3.8/site-packages/airflow/utils/email.py:154: RemovedInAirflow3Warning: Fetching SMTP credentials from configuration variables will be deprecated in a future release. Please set credentials using a connection instead.
+  File "/opt/airflow/dags/PFM_monitoring.py", line 253, in write_one_log
+    pg.run(
+  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/providers/common/sql/hooks/sql.py", line 392, in run
+    self._run_command(cur, sql_statement, parameters)
+  File "/home/airflow/.local/lib/python3.8/site-packages/airflow/providers/common/sql/hooks/sql.py", line 421, in _run_command
+    cur.execute(sql_statement, parameters)
+psycopg2.errors.InvalidColumnReference: there is no unique or exclusion constraint matching the ON CONFLICT specification
+[2026-02-12, 17:07:17 +05] {taskinstance.py:1400} INFO - Marking task as FAILED. dag_id=PFM_monitoring, task_id=log_wf_8661_to_pg, execution_date=20260212T120711, start_date=20260212T120715, end_date=20260212T120717
+[2026-02-12, 17:07:17 +05] {warnings.py:109} WARNING - /home/***/.local/lib/python3.8/site-packages/***/utils/email.py:154: RemovedInAirflow3Warning: Fetching SMTP credentials from configuration variables will be deprecated in a future release. Please set credentials using a connection instead.
   send_mime_email(e_from=mail_from, e_to=recipients, mime_msg=msg, conn_id=conn_id, dryrun=dryrun)
-[2026-02-04, 11:36:06 +05] {email.py:270} INFO - Email alerting: attempt 1
-[2026-02-04, 11:36:06 +05] {email.py:281} INFO - Sent an alert email to ['EstayA@halykbank.kz']
-[2026-02-04, 11:36:07 +05] {standard_task_runner.py:104} ERROR - Failed to execute job 1595733 for task notify_wf_4726_status (send_message() missing 1 required positional argument: 'proxies'; 583053)
-[2026-02-04, 11:36:07 +05] {local_task_job_runner.py:228} INFO - Task exited with return code 1
-[2026-02-04, 11:36:07 +05] {taskinstance.py:2778} INFO - 0 downstream tasks scheduled from follow-on schedule check
+[2026-02-12, 17:07:17 +05] {email.py:270} INFO - Email alerting: attempt 1
+[2026-02-12, 17:07:17 +05] {email.py:281} INFO - Sent an alert email to ['EstayA@halykbank.kz']
+[2026-02-12, 17:07:17 +05] {standard_task_runner.py:104} ERROR - Failed to execute job 217499 for task log_wf_8661_to_pg (there is no unique or exclusion constraint matching the ON CONFLICT specification
+; 2679703)
+[2026-02-12, 17:07:17 +05] {local_task_job_runner.py:228} INFO - Task exited with return code 1
+[2026-02-12, 17:07:17 +05] {taskinstance.py:2778} INFO - 0 downstream tasks scheduled from follow-on schedule check

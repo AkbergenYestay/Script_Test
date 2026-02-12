@@ -1,1 +1,356 @@
 
+import datetime
+import pandas as pd
+
+from airflow import DAG
+from airflow.operators.python import PythonOperator
+from airflow.sensors.python import PythonSensor
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.models import Variable
+from airflow.exceptions import AirflowFailException
+
+# ======================
+# НАСТРОЙКИ
+# ======================
+default_args = {
+    "owner": "Yestay",
+    "email": ["EstayA@halykbank.kz"],
+    "email_on_failure": True,
+    "depends_on_past": False,
+}
+
+ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
+POSTGRES_CONN_ID = "db_postgres_monitoring__wf_monitor"
+
+# Чтобы не писать лог повторно в этот же день по одному workflow
+SENT_VAR_PREFIX = "pfm_acc_dep_openway_log_sent"
+
+NEED = [
+    {"workflow_id": 8661, "task_id": 8663},  # wf_PROD_edw_to_operations_account
+    {"workflow_id": 8671, "task_id": 8679},  # wf_PROD_edw_to_operations_deposit
+    {"workflow_id": 8690, "task_id": 8696},  # wf_PROD_edw_to_operations_openway
+]
+
+SQL_MONITOR_WF_TASK_BY_ID = """
+WITH need AS (
+    -- wf_PROD_edw_to_operations_account -> s_m_PROD_account_edw_to_operations
+    SELECT 8661 AS workflow_id, 8663 AS task_id FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_deposit -> s_m_PROD_deposit_edw_to_operations
+    SELECT 8671, 8679 FROM dual UNION ALL
+
+    -- wf_PROD_edw_to_operations_openway -> s_m_PROD_openway_edw_to_operations
+    SELECT 8690, 8696 FROM dual
+),
+last_wf_run AS (
+    SELECT
+        r.workflow_id,
+        r.workflow_name,
+        r.workflow_run_id,
+        r.start_time AS wf_start_time,
+        r.end_time   AS wf_end_time,
+        r.run_err_code,
+        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
+    FROM RB_REP.OPB_WFLOW_RUN r
+    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
+      AND r.workflow_id IN (SELECT workflow_id FROM need)
+),
+ins_rows AS (
+    SELECT
+        s.workflow_run_id,
+        MAX(s.affected_rows) AS inserted_rows
+    FROM RB_REP.OPB_SWIDGINST_LOG s
+    GROUP BY s.workflow_run_id
+),
+last_task_run AS (
+    SELECT
+        tr.workflow_run_id,
+        tr.instance_id,
+        tr.instance_name,
+        tr.task_id,
+        tr.start_time AS task_start_time,
+
+        CASE
+            WHEN tr.end_time IS NULL THEN NULL
+            WHEN tr.start_time IS NOT NULL AND tr.end_time < tr.start_time THEN NULL
+            WHEN tr.end_time > SYSDATE THEN NULL
+            ELSE tr.end_time
+        END AS task_end_time,
+
+        tr.run_err_code AS task_run_err_code,
+        ROW_NUMBER() OVER (
+            PARTITION BY tr.workflow_run_id, tr.instance_id
+            ORDER BY tr.start_time DESC
+        ) rn
+    FROM RB_REP.OPB_TASK_INST_RUN tr
+    WHERE TRUNC(tr.start_time) = TRUNC(SYSDATE)
+      AND tr.task_id IN (SELECT task_id FROM need)
+)
+SELECT
+    w.workflow_name,
+    w.workflow_id,
+    w.workflow_run_id,
+    w.wf_start_time,
+    w.wf_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
+        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
+        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
+        ELSE 'SUCCESS'
+    END AS wf_status,
+    NVL(ir.inserted_rows, 0) AS inserted_rows,
+
+    n.task_id,
+    tr.task_start_time,
+    tr.task_end_time,
+    CASE
+        WHEN w.workflow_run_id IS NULL THEN 'NO RUN'
+        WHEN tr.task_start_time IS NULL THEN 'TASK NO RUN'
+        WHEN tr.task_end_time IS NULL THEN 'TASK RUNNING'
+        WHEN NVL(tr.task_run_err_code,0) <> 0 THEN 'TASK ERROR/WARNING'
+        ELSE 'TASK SUCCESS'
+    END AS task_status
+FROM need n
+LEFT JOIN last_wf_run w
+    ON w.workflow_id = n.workflow_id
+   AND w.rn = 1
+LEFT JOIN ins_rows ir
+    ON ir.workflow_run_id = w.workflow_run_id
+LEFT JOIN last_task_run tr
+    ON tr.workflow_run_id = w.workflow_run_id
+   AND tr.task_id = n.task_id
+   AND tr.rn = 1
+ORDER BY n.workflow_id
+"""
+
+
+# ======================
+# HELPERS
+# ======================
+def _sent_key(workflow_id: int) -> str:
+    return f"{SENT_VAR_PREFIX}_{workflow_id}"
+
+
+def _fetch_df() -> pd.DataFrame:
+    oracle_hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
+    conn = oracle_hook.get_conn()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(SQL_MONITOR_WF_TASK_BY_ID)
+            rows = cursor.fetchall()
+            cols = [c[0] for c in cursor.description]
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _row_for_workflow(df: pd.DataFrame, workflow_id: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    return df[df["WORKFLOW_ID"] == workflow_id].copy()
+
+
+def _is_ready(r: pd.Series) -> bool:
+    # Готовность именно этой загрузки
+    not_ready = (
+        pd.isna(r["WORKFLOW_RUN_ID"])
+        or pd.isna(r["WF_END_TIME"])
+        or pd.isna(r["TASK_END_TIME"])
+    )
+    return not not_ready
+
+
+def _map_status(r: pd.Series) -> str:
+    # Приведем к компактным статусам под логирование
+    # SUCCESS / FAILED / RUNNING / NOT_STARTED
+    wf_status = str(r.get("WF_STATUS") or "")
+    task_status = str(r.get("TASK_STATUS") or "")
+
+    if wf_status in ("NOT STARTED", "NO RUN"):
+        return "NOT_STARTED"
+
+    if wf_status == "RUNNING" or task_status in ("TASK RUNNING", "TASK NO RUN"):
+        return "RUNNING"
+
+    has_errors = (wf_status == "ERROR/WARNING") or (task_status == "TASK ERROR/WARNING")
+    return "FAILED" if has_errors else "SUCCESS"
+
+
+# ======================
+# SENSOR: ждать завершения одной загрузки
+# ======================
+def wait_one_done(workflow_id: int, task_id: int, **context) -> bool:
+    today = datetime.date.today().isoformat()
+    sent_var = _sent_key(workflow_id)
+    last_sent = Variable.get(sent_var, default_var="1970-01-01")
+
+    print(f"[INFO] wait_one_done wf={workflow_id} task={task_id} today={today} last_sent={last_sent}")
+
+    # Если лог уже писали сегодня по этому workflow — сенсор считается успешным
+    if last_sent == today:
+        print("[INFO] Already logged today for this workflow. Sensor succeeds.")
+        return True
+
+    df = _fetch_df()
+    if df.empty:
+        print("[INFO] No rows yet. Waiting...")
+        return False
+
+    one = _row_for_workflow(df, workflow_id)
+    if one.empty:
+        print("[INFO] No row for this workflow yet. Waiting...")
+        return False
+
+    r = one.iloc[0]
+
+    if not _is_ready(r):
+        print("[INFO] This workflow/task not finished yet. Waiting...")
+        return False
+
+    print("[INFO] This workflow/task finished. Sensor succeeds.")
+    return True
+
+
+# ======================
+# ACTION: записать лог в Postgres (UPSERT)
+# ======================
+def write_one_log(workflow_id: int, **context) -> None:
+    today = datetime.date.today()
+    today_iso = today.isoformat()
+
+    sent_var = _sent_key(workflow_id)
+    last_sent = Variable.get(sent_var, default_var="1970-01-01")
+    print(f"[INFO] write_one_log wf={workflow_id} today={today_iso} last_sent={last_sent}")
+
+    if last_sent == today_iso:
+        print("[INFO] Already logged today for this workflow. Skipping.")
+        return
+
+    df = _fetch_df()
+    one = _row_for_workflow(df, workflow_id)
+    if one.empty:
+        raise AirflowFailException(f"No row for workflow_id={workflow_id} to log")
+
+    r = one.iloc[0]
+
+    if not _is_ready(r):
+        raise AirflowFailException(f"Workflow not finished yet (workflow_id={workflow_id})")
+
+    status = _map_status(r)
+
+    # Поля из Oracle
+    workflow_name = r.get("WORKFLOW_NAME")
+    workflow_run_id = r.get("WORKFLOW_RUN_ID")
+    wf_start_time = r.get("WF_START_TIME")
+    wf_end_time = r.get("WF_END_TIME")
+    wf_status = r.get("WF_STATUS")
+    inserted_rows = r.get("INSERTED_ROWS") or 0
+    task_id = int(r.get("TASK_ID"))
+    task_start_time = r.get("TASK_START_TIME")
+    task_end_time = r.get("TASK_END_TIME")
+    task_status = r.get("TASK_STATUS")
+
+    # Длительность минут (если есть обе даты)
+    duration_min = None
+    try:
+        if wf_start_time is not None and wf_end_time is not None:
+            duration_min = round((wf_end_time - wf_start_time).total_seconds() / 60.0, 2)
+    except Exception:
+        duration_min = None
+
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+    # UPSERT: ключ (workflow_id, date_value, task_id)
+    # Таблица ниже — public.pfm_etl_log (см. DDL в конце)
+    pg.run(
+        """
+        INSERT INTO public.pfm_etl_log (
+            date_value,
+            workflow_id,
+            task_id,
+            workflow_name,
+            workflow_run_id,
+            wf_start_time,
+            wf_end_time,
+            duration_min,
+            wf_status,
+            task_start_time,
+            task_end_time,
+            task_status,
+            inserted_rows,
+            status,
+            updated_at,
+            created_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), now())
+        ON CONFLICT (date_value, workflow_id, task_id)
+        DO UPDATE SET
+            workflow_name   = EXCLUDED.workflow_name,
+            workflow_run_id = EXCLUDED.workflow_run_id,
+            wf_start_time   = EXCLUDED.wf_start_time,
+            wf_end_time     = EXCLUDED.wf_end_time,
+            duration_min    = EXCLUDED.duration_min,
+            wf_status       = EXCLUDED.wf_status,
+            task_start_time = EXCLUDED.task_start_time,
+            task_end_time   = EXCLUDED.task_end_time,
+            task_status     = EXCLUDED.task_status,
+            inserted_rows   = EXCLUDED.inserted_rows,
+            status          = EXCLUDED.status,
+            updated_at      = now()
+        """,
+        parameters=(
+            today,
+            int(workflow_id),
+            int(task_id),
+            workflow_name,
+            workflow_run_id,
+            wf_start_time,
+            wf_end_time,
+            duration_min,
+            wf_status,
+            task_start_time,
+            task_end_time,
+            task_status,
+            int(inserted_rows),
+            status,
+        ),
+    )
+
+    Variable.set(sent_var, today_iso)
+    print(f"[INFO] Logged to Postgres OK. Variable {sent_var} set to {today_iso}")
+
+
+# ======================
+# DAG
+# ======================
+with DAG(
+    dag_id="pfm_acc_dep_openway_log_to_pg",
+    default_args=default_args,
+    start_date=datetime.datetime(2026, 1, 22),
+    schedule="0 9 * * *",
+    catchup=False,
+    tags=["pfm", "monitoring", "oracle", "postgres"],
+    max_active_runs=1,
+) as dag:
+
+    for item in NEED:
+        wf_id = item["workflow_id"]
+        task_id = item["task_id"]
+
+        wait = PythonSensor(
+            task_id=f"wait_wf_{wf_id}_done",
+            python_callable=wait_one_done,
+            op_kwargs={"workflow_id": wf_id, "task_id": task_id},
+            mode="reschedule",
+            poke_interval=600,          # 10 минут
+            timeout=16 * 60 * 60,       # 16 часов
+        )
+
+        write_log = PythonOperator(
+            task_id=f"log_wf_{wf_id}_to_pg",
+            python_callable=write_one_log,
+            op_kwargs={"workflow_id": wf_id},
+        )
+
+        wait >> write_log

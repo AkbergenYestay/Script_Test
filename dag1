@@ -1,256 +1,286 @@
-import datetime
-import pandas as pd
+from datetime import datetime, timedelta, date
 
 from airflow import DAG
+from airflow.sensors.base import BaseSensorOperator
 from airflow.operators.python import PythonOperator
-from airflow.sensors.python import PythonSensor
 from airflow.providers.oracle.hooks.oracle import OracleHook
-from airflow.models import Variable
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.exceptions import AirflowFailException
+from airflow.operators.dummy import DummyOperator
+from typing import Dict, Any
+from airflow.utils.dates import days_ago
+from typing import Dict, List, Any
+import pendulum
 
-from source.telegram_topic_notifier import TelegramTopicNotifier
-from source.telegram_notifications import TelegramErrorNotification
+ORACLE_CONN_ID_IPC = "db_oracle_ipc__edw_ipc"
+ORACLE_CONN_ID_EDW = 'EDW_ETL_CDO'
+POSTGRES_CONN_ID = "db_postgres_monitoring__wf_monitor"
 
-DAG_ID = "dm_incall_centersegmentation_send_notifications"
-ORACLE_CONN_ID = "db_oracle_ipc__edw_ipc"
-
-WORKFLOW_ID = 4726
-WORKFLOW_NAME_FALLBACK = "wf_dm_incall_centersegmentation_edw"
-
-TOTAL_TASKS = 20
-SENT_VAR = f"{DAG_ID}_sent_date"
-
-POKE_INTERVAL = 600          # 10 минут
-TIMEOUT = 6 * 60 * 60        # 6 часов (с 07:00 до 13:00)
-
-default_args = {
-    "owner": "Yestay",
-    "email": ["EstayA@halykbank.kz"],
-    "email_on_failure": True,
-    "depends_on_past": False,
-}
-
-NEED_TASK_IDS = [
-    4731,  # s_MP_INCORRECT_PINCODE
-    4737,  # s_MP_DEPOSIT_SEGMENT
-    4740,  # s_MP_CARD_BLOCK
-    4738,  # s_MP_ACTIVITY_SEGMENTATION
-    4736,  # s_M_TO_DSSB_RETIREES_DETAILED
-    4739,  # s_MP_SERVICE_CHAN_SEGMENT
-    4778,  # s_MP_LOST_CARDS
-    4746,  # s_MP_CALL_CENTER_SERVICE
-    4727,  # s_MP_LOAN_HALYK_SEGMENT
-    4735,  # s_MP_LOANTYPE_SEGMENT
-    4745,  # s_MP_ATM_SERVICE_SEGMENTATION
-    4728,  # s_M_COMMUNICATION_LAST_7_DAYS
-    4743,  # s_MP_DM_INCALL_CENTERSEGMENTATION
-    4733,  # s_MP_LOAN_NUM_SEGMENT
-    4742,  # s_MP_DM_INCALL_CENTERSEGMENTATION_NEW
-    4741,  # s_MP_SERVICES_SEGMENTATION
-    4747,  # s_MP_ONLINE_TRANSACTION_SEGMENTATION
-    4744,  # s_MP_PERSON_INDIVIDUAL_SEGMENTATION
-    4732,  # s_MP_BENEFIT_SEGMENT
-    4730,  # s_MP_POS_HOMEBANK_SEGMENTATION
+PROCESSING_DATE = "TRUNC(SYSDATE)"
+# PROCESSING_DATE = "DATE'2025-12-31'"
+#
+WORKFLOW_CONFIGS = [
+    {
+        'workflow_id': 8661,  # wf_PROD_edw_to_operations_account
+        'instance_id': 4659,  # m_PROD_account_edw_to_operations
+        'name': 'ACCOUNT'
+    },
+    {
+        'workflow_id': 8671,  # wf_PROD_edw_to_operations_deposit
+        'instance_id': 4673,  # m_PROD_deposit_edw_to_operations
+        'name': 'DEPOSIT'
+    },
+    {
+        'workflow_id': 8690,  # wf_PROD_edw_to_operations_openway
+        'instance_id': 4685,  # m_PROD_openway_edw_to_operations
+        'name': 'OPENWAY'
+    }
 ]
 
-def _need_union_sql() -> str:
-    parts = []
-    for tid in NEED_TASK_IDS:
-        parts.append(f"SELECT {WORKFLOW_ID} AS workflow_id, {int(tid)} AS task_id FROM dual")
-    return "\nUNION ALL\n".join(parts)
+default_args = {
+    'owner': 'Almas',
+    'depends_on_past': False,
+    'start_date': pendulum.datetime(2025, 12, 23, tz="UTC"),
+    'email_on_failure': True,
+    'email_on_retry': False,
+    'retries': 1,
+    'retry_delay': timedelta(minutes=5),
+}
 
 
-SQL_CHECK = """
-WITH need AS (
-    {need_union}
-),
-last_wf_run AS (
-    SELECT
-        r.workflow_id,
-        r.workflow_name,
-        r.workflow_run_id,
-        r.start_time AS wf_start_time,
-        r.end_time   AS wf_end_time,
-        r.run_err_code,
-        ROW_NUMBER() OVER (PARTITION BY r.workflow_id ORDER BY r.start_time DESC) rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE r.workflow_id = {workflow_id}
-      AND r.start_time >= TRUNC(SYSDATE) - 1
-      AND r.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
-),
-last_task_run AS (
-    SELECT
-        tr.workflow_run_id,
-        tr.task_id,
-        tr.instance_name,
-        tr.start_time AS task_start_time,
-        tr.end_time   AS task_end_time,
-        tr.run_err_code AS task_run_err_code,
-        ROW_NUMBER() OVER (
-            PARTITION BY tr.workflow_run_id, tr.task_id
-            ORDER BY tr.start_time DESC
-        ) rn
-    FROM RB_REP.OPB_TASK_INST_RUN tr
-    JOIN last_wf_run w
-      ON w.workflow_run_id = tr.workflow_run_id
-     AND w.rn = 1
-    JOIN need n
-      ON n.task_id = tr.task_id
-     AND n.workflow_id = w.workflow_id
-    WHERE tr.start_time >= TRUNC(SYSDATE) - 1
-      AND tr.start_time <  TRUNC(SYSDATE) + INTERVAL '7' HOUR
-      AND LOWER(tr.instance_name) NOT LIKE '%sys_dependency%'
-)
-SELECT
-    w.workflow_id,
-    NVL(w.workflow_name, '{wf_name_fallback}') AS workflow_name,
-    w.workflow_run_id,
-    w.wf_start_time,
-    w.wf_end_time,
-    CASE
-        WHEN w.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN w.wf_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(w.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END AS wf_status,
+def get_processing_date():
+    if PROCESSING_DATE == "TRUNC(SYSDATE-1)":
+        return date.today() - timedelta(days=1)
+    elif PROCESSING_DATE == "TRUNC(SYSDATE)":
+        return date.today()
+    elif PROCESSING_DATE.startswith("DATE'"):
+        return datetime.strptime(
+            PROCESSING_DATE.replace("DATE'", "").replace("'", ""),
+            "%Y-%m-%d"
+        ).date()
+    else:
+        return datetime.strptime(PROCESSING_DATE, "%Y-%m-%d").date()
 
-    COUNT(n.task_id) AS total_tasks,
-    SUM(CASE WHEN t.task_end_time IS NOT NULL THEN 1 ELSE 0 END) AS finished_tasks,
-    SUM(CASE WHEN NVL(t.task_run_err_code,0) <> 0 THEN 1 ELSE 0 END) AS error_tasks
-FROM last_wf_run w
-JOIN need n
-  ON n.workflow_id = w.workflow_id
-LEFT JOIN last_task_run t
-  ON t.workflow_run_id = w.workflow_run_id
- AND t.task_id = n.task_id
- AND t.rn = 1
-WHERE w.rn = 1
-GROUP BY
-    w.workflow_id,
-    w.workflow_name,
-    w.workflow_run_id,
-    w.wf_start_time,
-    w.wf_end_time,
-    w.run_err_code
-"""
+PROCESSING_DATE = get_processing_date()
+
+# -------------------------------------------------------------------
+# SENSOR
+# -------------------------------------------------------------------
+class SourceWorkflowSensor(BaseSensorOperator):
+
+    def __init__(
+            self,
+            oracle_conn_id: str,
+            workflow_id: int,
+            instance_id: int,
+            processing_date: date,
+            **kwargs
+    ):
+        super().__init__(**kwargs)
+        self.oracle_conn_id = oracle_conn_id
+        self.workflow_id = workflow_id
+        self.instance_id = instance_id
+        self.processing_date = processing_date
+
+    def poke(self, context: Dict[str, Any]) -> bool:
+        hook = OracleHook(oracle_conn_id=self.oracle_conn_id, thick_mode=True)
+        #conn = hook.get_conn()
+        #cursor = conn.cursor()
+
+        sql = """
+        select 1
+        from dual
+        where exists (
+            select 1
+            from RB_REP.OPB_WFLOW_RUN wr
+            join RB_REP.OPB_SESS_TASK_LOG sl
+              on sl.workflow_id = wr.workflow_id
+             and sl.workflow_run_id = wr.workflow_run_id
+            join RB_REP.OPB_TASK_INST ti
+              on ti.workflow_id = wr.workflow_id
+             and ti.instance_id = sl.instance_id
+            where trunc(wr.start_time) = :proc_date
+              and wr.workflow_id = :workflow_id
+              and ti.instance_id = :instance_id
+              and ti.task_type = 68
+        )
+        """
+
+        try:
+            result = hook.get_first(
+                sql,
+                parameters={
+                    "proc_date": self.processing_date, #datetime.strptime(self.processing_date,"%Y-%m-%d").date(),
+                    "workflow_id": self.workflow_id,
+                    "instance_id": self.instance_id,
+                }
+            )
+            #print(result)
+            flag = result is not None
+            self.log.info(
+                "workflow_id=%s instance_id=%s flag=%s",
+                self.workflow_id, self.instance_id, flag
+            )
+            return flag
+
+        except Exception as e:
+            raise AirflowFailException(f"Source check failed: {str(e)}")
 
 
-def fetch_df() -> pd.DataFrame:
-    sql = SQL_CHECK.format(
-        need_union=_need_union_sql(),
-        workflow_id=WORKFLOW_ID,
-        wf_name_fallback=WORKFLOW_NAME_FALLBACK,
+# -------------------------------------------------------------------
+# LOAD TO POSTGRES
+# -------------------------------------------------------------------
+
+def load_to_pg(wf: dict):
+    ora = OracleHook(oracle_conn_id=ORACLE_CONN_ID_IPC, thick_mode=True)
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+    sql = f"""
+    select
+        wr.workflow_id,
+        trunc(sysdate-1) as date_value,
+        wr.workflow_name,
+        sl.mapping_name,
+        wr.start_time,
+        wr.end_time,
+        round(to_number( (wr.end_time)-(wr.start_time)  )*24*60,2) as duration_min,
+        CASE 
+                    WHEN (sl.first_error_code = '0' and sl.src_success_rows-sl.targ_success_rows=0) THEN 'SUCCESS' else 'FAILED' 
+                END as status,
+        sl.src_success_rows as source_count,
+        sl.src_failed_rows as source_failed_rows,
+        sl.targ_success_rows as target_inserted,
+        sl.targ_failed_rows as target_rejected_rows,
+        sl.first_error_code as error_code,
+        sl.first_error_msg as error_msg
+    from RB_REP.OPB_WFLOW_RUN wr
+    join RB_REP.OPB_SESS_TASK_LOG sl
+      on sl.workflow_id = wr.workflow_id
+     and sl.workflow_run_id = wr.workflow_run_id
+    join RB_REP.OPB_TASK_INST ti
+      on ti.workflow_id = wr.workflow_id
+     and ti.instance_id = sl.instance_id
+    where --trunc(wr.start_time) = :proc_date
+      trunc(wr.start_time)>=date'2025-12-20' and trunc(wr.start_time)<date'2025-01-17'
+      and wr.workflow_id = :wf_id
+      and ti.instance_id = :ins_id
+      and ti.task_type = 68
+    """
+
+
+    rows = ora.get_records(
+        sql,
+        parameters={
+            "proc_date": PROCESSING_DATE, #datetime.strptime(processing_date,"%Y-%m-%d").date(),
+            "wf_id": wf["workflow_id"],
+            "ins_id": wf["instance_id"]
+        }
     )
+    print(rows)
 
-    hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
-    conn = hook.get_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-            cols = [c[0].upper() for c in cur.description]
-    finally:
-        conn.close()
+    if not rows:
+        raise ValueError("Нет данных для логирования")
 
-    return pd.DataFrame(rows, columns=cols)
+    for r in rows:
+        (   
+            workflow_id,
+            date_value,
+            workflow_name,
+            mapping_name,
+            start_time,
+            end_time,
+            duration_min,
+            status,
+            source_count,
+            source_failed_rows,
+            target_inserted,
+            target_rejected_rows,
+            error_code,
+            error_msg
+        ) = r
 
-
-def wait_workflow_done(**context) -> bool:
-    today = datetime.date.today().isoformat()
-    if Variable.get(SENT_VAR, default_var="") == today:
-        print("[INFO] Already sent today.")
-        return True
-
-    df = fetch_df()
-    if df.empty:
-        return False
-
-    r = df.iloc[0]
-    finished = int(r["FINISHED_TASKS"] or 0)
-    total = int(r["TOTAL_TASKS"] or 0)
-    print(f"[INFO] WF={r['WORKFLOW_NAME']} status={r['WF_STATUS']} progress={finished}/{total}")
-
-    return finished >= total and total == len(NEED_TASK_IDS)
-
-
-def _send_telegram_message(text: str, **context) -> None:
-    bot_token = context["var"]["value"].get("telegram_bot_token")
-    chat_id = context["var"]["value"].get("new_notifications_chat_id")
-    topic_id = context["var"]["value"].get("topic_id_for_cvm_notifications")
-
-    if not bot_token or not chat_id or not topic_id:
-        return
-
-    notifier = TelegramTopicNotifier(
-        bot_token=bot_token,
-        chat_id=chat_id,
-        topic_id=int(topic_id),
-    )
-    notifier.send_message(text)
-
-
-def send_final_status(**context) -> None:
-    today = datetime.date.today().isoformat()
-    if Variable.get(SENT_VAR, default_var="") == today:
-        print("[INFO] Already sent today.")
-        return
-
-    df = fetch_df()
-    if df.empty:
-        print("[WARN] No data.")
-        return
-
-    r = df.iloc[0]
-    wf_name = r["WORKFLOW_NAME"]
-    wf_start = r["WF_START_TIME"]
-    wf_end = r["WF_END_TIME"]
-    wf_status = r["WF_STATUS"]
-
-    finished = int(r["FINISHED_TASKS"] or 0)
-    total = int(r["TOTAL_TASKS"] or 0)
-    errors = int(r["ERROR_TASKS"] or 0)
-
-    has_errors = (wf_status == "ERROR/WARNING") or (errors > 0)
-    icon = "✅" if not has_errors else "❌"
-
-    msg = (
-        f"{icon} <b>{wf_name}</b>\n\n"
-        f"<b>Дата:</b> {today}\n\n"
-        f"WF start: {wf_start}\n"
-        f"WF end:   {wf_end}\n"
-        f"WF status: <b>{wf_status}</b>\n\n"
-        f"<b>Task:</b> выполнено <b>{finished}</b> из <b>{total}</b>\n"
-        f"<b>Ошибок:</b> {errors}"
-    )
-
-    _send_telegram_message(msg, **context)
-
-    Variable.set(SENT_VAR, today)
-    print(f"[INFO] Sent. Variable {SENT_VAR} set to {today}")
+        pg.run(
+            """
+            INSERT INTO public.pfm_etl_log (
+                workflow_id,
+                date_value,
+                workflow_name,
+                mapping_name,
+                start_time,
+                end_time,
+                duration_min,
+                status,
+                source_count,
+                source_failed_rows,
+                target_inserted,
+                target_rejected_rows,
+                error_code,
+                error_msg
+            )
+            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            parameters=(
+                workflow_id,
+                date_value,
+                workflow_name,
+                mapping_name,
+                start_time,
+                end_time,
+                duration_min,
+                status,
+                source_count,
+                source_failed_rows,
+                target_inserted,
+                target_rejected_rows,
+                error_code,
+                error_msg,
+            ),
+        )
 
 
+# -------------------------------------------------------------------
+# DAG
+# -------------------------------------------------------------------
 with DAG(
-    dag_id=DAG_ID,
-    default_args=default_args,
-    start_date=datetime.datetime(2026, 2, 1),
-    schedule="0 7 * * *",   
-    catchup=False,
-    max_active_runs=1,
-    tags=["informatica", "telegram"],
+        dag_id='PFM_monitoring',
+        default_args=default_args,
+        description='Мониторинг PFM за который просто спасибо сказали',
+        schedule='0 4 * * *',  # every day at 9 o'clock
+        catchup=False,
+        max_active_runs=1,
+        tags=['Almas A', 'PFM', 'monitoring', 'oracle to postgres']
 ) as dag:
+    start_task = DummyOperator(task_id='start')
+    end_task = DummyOperator(task_id='end')
 
-    wait = PythonSensor(
-        task_id="wait_wf_4726_all_tasks_done",
-        python_callable=wait_workflow_done,
-        poke_interval=POKE_INTERVAL,
-        timeout=TIMEOUT,
-        mode="reschedule",
-        on_failure_callback=[TelegramErrorNotification()],
-    )
+    transfer_tasks = []
 
-    notify = PythonOperator(
-        task_id="notify_wf_4726_status",
-        python_callable=send_final_status,
-        on_failure_callback=[TelegramErrorNotification()],
-    )
+    for config in WORKFLOW_CONFIGS:
+        name = config['name']
 
-    wait >> notify
+        # check flag task
+        wait_sensor = SourceWorkflowSensor(
+            task_id=f'check_{name}_ready',
+            oracle_conn_id=ORACLE_CONN_ID_IPC,
+            workflow_id=config["workflow_id"],
+            instance_id=config['instance_id'],
+            processing_date=PROCESSING_DATE,
+            poke_interval=900,
+            timeout=6 * 3600,
+            mode='reschedule'
+        )
+
+        # transfer task
+        transfer_task = PythonOperator(
+            task_id=f"load_pg_{config['workflow_id']}",
+            python_callable=load_to_pg,
+            op_kwargs={"wf": config},
+        )
+
+        start_task >> wait_sensor >> transfer_task
+        transfer_tasks.append(transfer_task)
+
+    # connect all transfer tasks with the final
+    if transfer_tasks:
+        for transfer_task in transfer_tasks:
+            transfer_task >> end_task

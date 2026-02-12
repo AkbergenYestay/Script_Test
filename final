@@ -1,55 +1,375 @@
-WITH last_run AS (
+from __future__ import annotations
+
+from datetime import datetime, timedelta, date, time
+from typing import Dict, Any, Optional, List
+
+import pendulum
+
+from airflow import DAG
+from airflow.sensors.base import BaseSensorOperator
+from airflow.operators.python import PythonOperator
+from airflow.providers.oracle.hooks.oracle import OracleHook
+from airflow.providers.postgres.hooks.postgres import PostgresHook
+from airflow.exceptions import AirflowFailException
+from airflow.operators.empty import EmptyOperator
+
+# -------------------------------------------------------------------
+# CONFIG
+# -------------------------------------------------------------------
+DAG_ID = "PFM_monitoring"
+
+ORACLE_CONN_ID_IPC = "db_oracle_ipc__edw_ipc"
+POSTGRES_CONN_ID = "db_postgres_monitoring__wf_monitor"
+
+# Если на воркере НЕТ Oracle Instant Client — поставь False:
+ORACLE_THICK_MODE = True
+
+# Логируем за какую дату:
+# - если хочешь T-1: return today - 1 day
+# - если T: return today
+LOG_T_MINUS_1 = True
+
+WORKFLOW_CONFIGS = [
+    {"workflow_id": 8661, "instance_id": 4659, "name": "ACCOUNT"},
+    {"workflow_id": 8671, "instance_id": 4673, "name": "DEPOSIT"},
+    {"workflow_id": 8690, "instance_id": 4685, "name": "OPENWAY"},
+]
+
+default_args = {
+    "owner": "Almas",
+    "depends_on_past": False,
+    "start_date": pendulum.datetime(2025, 12, 23, tz="UTC"),
+    "email_on_failure": True,
+    "email_on_retry": False,
+    "retries": 1,
+    "retry_delay": timedelta(minutes=5),
+}
+
+
+def get_processing_date() -> date:
+    # По умолчанию логируем за вчера (T-1)
+    today = date.today()
+    return (today - timedelta(days=1)) if LOG_T_MINUS_1 else today
+
+
+PROCESSING_DATE = get_processing_date()
+
+
+def as_oracle_day_range(d: date) -> tuple[datetime, datetime]:
+    """[d 00:00:00, d+1 00:00:00)"""
+    start_dt = datetime.combine(d, time.min)
+    end_dt = start_dt + timedelta(days=1)
+    return start_dt, end_dt
+
+
+# -------------------------------------------------------------------
+# SENSOR: ждём завершение workflow task_type=68 и фиксируем статус
+# -------------------------------------------------------------------
+class SourceWorkflowFinishedSensor(BaseSensorOperator):
+    """
+    Возвращает True, когда найден запуск wf/instance за дату и он ЗАВЕРШЁН.
+    Параллельно в лог пишет статус (SUCCESS/FAILED).
+    """
+
+    template_fields = ("processing_date",)
+
+    def __init__(
+        self,
+        oracle_conn_id: str,
+        workflow_id: int,
+        instance_id: int,
+        processing_date: date,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.oracle_conn_id = oracle_conn_id
+        self.workflow_id = workflow_id
+        self.instance_id = instance_id
+        self.processing_date = processing_date
+
+    def poke(self, context: Dict[str, Any]) -> bool:
+        hook = OracleHook(oracle_conn_id=self.oracle_conn_id, thick_mode=ORACLE_THICK_MODE)
+
+        day_start, day_end = as_oracle_day_range(self.processing_date)
+
+        # Логика:
+        # 1) берём последний run за день по workflow_id
+        # 2) смотрим сессию конкретного instance_id и task_type=68
+        # 3) считаем статус по error_code и сверке строк
+        # 4) считаем "finished" по наличию end_time у workflow_run (и/или sl.end_time если есть)
+        sql = """
+        WITH last_run AS (
+            SELECT
+                wr.workflow_id,
+                wr.workflow_run_id,
+                wr.workflow_name,
+                wr.start_time,
+                wr.end_time,
+                ROW_NUMBER() OVER (PARTITION BY wr.workflow_id ORDER BY wr.start_time DESC) rn
+            FROM RB_REP.OPB_WFLOW_RUN wr
+            WHERE wr.workflow_id = :wf_id
+              AND wr.start_time >= :day_start
+              AND wr.start_time <  :day_end
+        )
+        SELECT
+            lr.workflow_id,
+            lr.workflow_run_id,
+            lr.workflow_name,
+            sl.mapping_name,
+            lr.start_time,
+            lr.end_time,
+            sl.first_error_code,
+            sl.first_error_msg,
+            sl.src_success_rows,
+            sl.targ_success_rows
+        FROM last_run lr
+        JOIN RB_REP.OPB_SESS_TASK_LOG sl
+          ON sl.workflow_id = lr.workflow_id
+         AND sl.workflow_run_id = lr.workflow_run_id
+        JOIN RB_REP.OPB_TASK_INST ti
+          ON ti.workflow_id = lr.workflow_id
+         AND ti.instance_id = sl.instance_id
+        WHERE lr.rn = 1
+          AND ti.instance_id = :ins_id
+          AND ti.task_type = 68
+        """
+
+        try:
+            row = hook.get_first(
+                sql,
+                parameters={
+                    "wf_id": self.workflow_id,
+                    "ins_id": self.instance_id,
+                    "day_start": day_start,
+                    "day_end": day_end,
+                },
+            )
+
+            if not row:
+                self.log.info(
+                    "No run found yet for workflow_id=%s instance_id=%s date=%s",
+                    self.workflow_id, self.instance_id, self.processing_date
+                )
+                return False
+
+            (
+                workflow_id,
+                workflow_run_id,
+                workflow_name,
+                mapping_name,
+                start_time,
+                end_time,
+                first_error_code,
+                first_error_msg,
+                src_success_rows,
+                targ_success_rows,
+            ) = row
+
+            finished = end_time is not None
+            status = "RUNNING"
+            if finished:
+                ok = (str(first_error_code) == "0") and ((src_success_rows or 0) - (targ_success_rows or 0) == 0)
+                status = "SUCCESS" if ok else "FAILED"
+
+            self.log.info(
+                "Found run wf_id=%s run_id=%s ins_id=%s mapping=%s start=%s end=%s finished=%s status=%s",
+                workflow_id, workflow_run_id, self.instance_id, mapping_name, start_time, end_time, finished, status
+            )
+
+            # Ждём именно завершение
+            return finished
+
+        except Exception as e:
+            raise AirflowFailException(f"Source check failed (wf_id={self.workflow_id}, ins_id={self.instance_id}): {e}")
+
+
+# -------------------------------------------------------------------
+# LOAD TO POSTGRES with UPSERT (idempotent)
+# -------------------------------------------------------------------
+def load_to_pg(wf: dict, processing_date: date) -> None:
+    ora = OracleHook(oracle_conn_id=ORACLE_CONN_ID_IPC, thick_mode=ORACLE_THICK_MODE)
+    pg = PostgresHook(postgres_conn_id=POSTGRES_CONN_ID)
+
+    day_start, day_end = as_oracle_day_range(processing_date)
+
+    # Забираем ПОСЛЕДНИЙ run за день и пишем лог.
+    # Если надо логировать ВСЕ запуски за день — скажи, поменяю (но для мониторинга чаще нужен последний).
+    sql = """
+    WITH last_run AS (
+        SELECT
+            wr.workflow_id,
+            wr.workflow_run_id,
+            wr.workflow_name,
+            wr.start_time,
+            wr.end_time,
+            ROW_NUMBER() OVER (PARTITION BY wr.workflow_id ORDER BY wr.start_time DESC) rn
+        FROM RB_REP.OPB_WFLOW_RUN wr
+        WHERE wr.workflow_id = :wf_id
+          AND wr.start_time >= :day_start
+          AND wr.start_time <  :day_end
+    )
     SELECT
-        r.workflow_id,
-        r.workflow_run_id,
-        r.start_time,
-        r.end_time,
-        r.run_err_code,
-        ROW_NUMBER() OVER (
-            PARTITION BY r.workflow_id
-            ORDER BY r.start_time DESC
-        ) rn
-    FROM RB_REP.OPB_WFLOW_RUN r
-    WHERE TRUNC(r.start_time) = TRUNC(SYSDATE)
-),
-wf_today AS (
-    SELECT
-        wf.workflow_id,
-        wf.workflow_name,
-        wf.scheduler_id,
-        lr.workflow_run_id,
-        lr.start_time AS run_start_time,
-        lr.end_time   AS run_end_time,
-        lr.run_err_code
-    FROM RB_REP.OPB_WORKFLOW wf
-    LEFT JOIN last_run lr
-        ON lr.workflow_id = wf.workflow_id
-       AND lr.rn = 1
-)
-SELECT
-    t.workflow_name                                       AS workflow_name,
-    t.run_start_time                                      AS run_start_time,
+        lr.workflow_id,
+        :ins_id AS instance_id,
+        CAST(:proc_date AS DATE) AS date_value,
+        lr.workflow_name,
+        sl.mapping_name,
+        lr.start_time,
+        lr.end_time,
+        ROUND( (lr.end_time - lr.start_time) * 24 * 60, 2 ) AS duration_min,
+        CASE
+            WHEN lr.end_time IS NULL THEN 'RUNNING'
+            WHEN (sl.first_error_code = '0' AND (NVL(sl.src_success_rows,0) - NVL(sl.targ_success_rows,0)) = 0) THEN 'SUCCESS'
+            ELSE 'FAILED'
+        END AS status,
+        sl.src_success_rows AS source_count,
+        sl.src_failed_rows AS source_failed_rows,
+        sl.targ_success_rows AS target_inserted,
+        sl.targ_failed_rows AS target_rejected_rows,
+        sl.first_error_code AS error_code,
+        sl.first_error_msg AS error_msg
+    FROM last_run lr
+    JOIN RB_REP.OPB_SESS_TASK_LOG sl
+      ON sl.workflow_id = lr.workflow_id
+     AND sl.workflow_run_id = lr.workflow_run_id
+    JOIN RB_REP.OPB_TASK_INST ti
+      ON ti.workflow_id = lr.workflow_id
+     AND ti.instance_id = sl.instance_id
+    WHERE lr.rn = 1
+      AND ti.instance_id = :ins_id
+      AND ti.task_type = 68
+    """
 
-    /* дата последнего изменения — по scheduler */
-    TO_DATE(s.last_saved, 'MM/DD/YYYY/HH24/MI')           AS last_update_time,
+    # Важно: proc_date передаём как datetime (oracle driver дружит лучше)
+    proc_dt = datetime.combine(processing_date, time.min)
 
-    /* плановое время запуска */
-    TO_CHAR(
-        TO_DATE(s.start_time, 'MM/DD/YYYY/HH24/MI'),
-        'HH24:MI'
-    )                                                     AS wf_sched_time,
+    row = ora.get_first(
+        sql,
+        parameters={
+            "wf_id": wf["workflow_id"],
+            "ins_id": wf["instance_id"],
+            "proc_date": proc_dt,
+            "day_start": day_start,
+            "day_end": day_end,
+        },
+    )
 
-    CASE
-        WHEN t.workflow_run_id IS NULL THEN 'NOT STARTED'
-        WHEN t.run_end_time IS NULL THEN 'RUNNING'
-        WHEN NVL(t.run_err_code,0) <> 0 THEN 'ERROR/WARNING'
-        ELSE 'SUCCESS'
-    END                                                   AS wf_status
+    if not row:
+        raise AirflowFailException(
+            f"No data to log: wf_id={wf['workflow_id']}, ins_id={wf['instance_id']}, date={processing_date}"
+        )
 
-FROM wf_today t
-LEFT JOIN RB_REP.OPB_SCHEDULER s
-    ON s.scheduler_id = t.scheduler_id
+    (
+        workflow_id,
+        instance_id,
+        date_value,
+        workflow_name,
+        mapping_name,
+        start_time,
+        end_time,
+        duration_min,
+        status,
+        source_count,
+        source_failed_rows,
+        target_inserted,
+        target_rejected_rows,
+        error_code,
+        error_msg,
+    ) = row
 
-ORDER BY
-    t.run_start_time DESC NULLS LAST,
-    LOWER(t.workflow_name);
+    # UPSERT (idempotent)
+    # Требует UNIQUE INDEX (workflow_id, instance_id, date_value, mapping_name)
+    pg.run(
+        """
+        INSERT INTO public.pfm_etl_log (
+            workflow_id,
+            instance_id,
+            date_value,
+            workflow_name,
+            mapping_name,
+            start_time,
+            end_time,
+            duration_min,
+            status,
+            source_count,
+            source_failed_rows,
+            target_inserted,
+            target_rejected_rows,
+            error_code,
+            error_msg,
+            updated_at,
+            created_at
+        )
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s, now(), now())
+        ON CONFLICT (workflow_id, instance_id, date_value, mapping_name)
+        DO UPDATE SET
+            workflow_name        = EXCLUDED.workflow_name,
+            start_time           = EXCLUDED.start_time,
+            end_time             = EXCLUDED.end_time,
+            duration_min         = EXCLUDED.duration_min,
+            status               = EXCLUDED.status,
+            source_count         = EXCLUDED.source_count,
+            source_failed_rows   = EXCLUDED.source_failed_rows,
+            target_inserted      = EXCLUDED.target_inserted,
+            target_rejected_rows = EXCLUDED.target_rejected_rows,
+            error_code           = EXCLUDED.error_code,
+            error_msg            = EXCLUDED.error_msg,
+            updated_at           = now()
+        """,
+        parameters=(
+            workflow_id,
+            instance_id,
+            date_value,
+            workflow_name,
+            mapping_name,
+            start_time,
+            end_time,
+            duration_min,
+            status,
+            source_count,
+            source_failed_rows,
+            target_inserted,
+            target_rejected_rows,
+            str(error_code) if error_code is not None else None,
+            error_msg,
+        ),
+    )
+
+
+# -------------------------------------------------------------------
+# DAG
+# -------------------------------------------------------------------
+with DAG(
+    dag_id=DAG_ID,
+    default_args=default_args,
+    description="Мониторинг PFM (Oracle -> Postgres), умный сенсор + UPSERT",
+    schedule="0 4 * * *",  # ежедневно 04:00 (проверь TZ в Airflow)
+    catchup=False,
+    max_active_runs=1,
+    tags=["PFM", "monitoring", "oracle", "postgres"],
+) as dag:
+
+    start = EmptyOperator(task_id="start")
+    end = EmptyOperator(task_id="end")
+
+    for cfg in WORKFLOW_CONFIGS:
+        name = cfg["name"]
+
+        wait_finished = SourceWorkflowFinishedSensor(
+            task_id=f"wait_{name}_finished",
+            oracle_conn_id=ORACLE_CONN_ID_IPC,
+            workflow_id=cfg["workflow_id"],
+            instance_id=cfg["instance_id"],
+            processing_date=PROCESSING_DATE,
+            poke_interval=15 * 60,      # 15 минут
+            timeout=6 * 60 * 60,        # 6 часов
+            mode="reschedule",
+        )
+
+        upsert_log = PythonOperator(
+            task_id=f"upsert_log_{cfg['workflow_id']}",
+            python_callable=load_to_pg,
+            op_kwargs={"wf": cfg, "processing_date": PROCESSING_DATE},
+        )
+
+        start >> wait_finished >> upsert_log >> end

@@ -1,6 +1,8 @@
 import datetime
 import pandas as pd
 
+from typing import Tuple, Optional
+
 from airflow import DAG
 from airflow.operators.python import PythonOperator
 from airflow.sensors.python import PythonSensor
@@ -8,6 +10,7 @@ from airflow.providers.oracle.hooks.oracle import OracleHook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from airflow.models import Variable
 from airflow.exceptions import AirflowFailException
+
 
 # =========================
 # DAG CONFIG (NO NOTIFICATIONS)
@@ -114,11 +117,13 @@ LEFT JOIN last_task_run tr
 ORDER BY n.workflow_id
 """
 
+
 # =========================
 # HELPERS
 # =========================
 def _sent_key(workflow_id: int) -> str:
-    return f"{SENT_VAR_PREFIX}_{workflow_id}"
+    return "{0}_{1}".format(SENT_VAR_PREFIX, int(workflow_id))
+
 
 def _fetch_df() -> pd.DataFrame:
     oracle_hook = OracleHook(oracle_conn_id=ORACLE_CONN_ID, thick_mode=True)
@@ -132,10 +137,12 @@ def _fetch_df() -> pd.DataFrame:
         conn.close()
     return pd.DataFrame(rows, columns=cols)
 
+
 def _row_for_workflow(df: pd.DataFrame, workflow_id: int) -> pd.DataFrame:
     if df.empty:
         return df
     return df[df["WORKFLOW_ID"] == workflow_id].copy()
+
 
 def _is_ready(r: pd.Series) -> bool:
     return not (
@@ -143,6 +150,7 @@ def _is_ready(r: pd.Series) -> bool:
         or pd.isna(r["WF_END_TIME"])
         or pd.isna(r["TASK_END_TIME"])
     )
+
 
 def _final_status(r: pd.Series) -> str:
     wf_status = str(r.get("WF_STATUS") or "")
@@ -157,7 +165,8 @@ def _final_status(r: pd.Series) -> str:
     has_errors = (wf_status == "ERROR/WARNING") or (task_status == "TASK ERROR/WARNING")
     return "FAILED" if has_errors else "SUCCESS"
 
-def _error_code_and_msg(r: pd.Series) -> tuple[int, str | None]:
+
+def _error_code_and_msg(r: pd.Series) -> Tuple[int, Optional[str]]:
     status = _final_status(r)
     if status == "SUCCESS":
         return 0, None
@@ -166,6 +175,7 @@ def _error_code_and_msg(r: pd.Series) -> tuple[int, str | None]:
     if status == "RUNNING":
         return 2, "RUNNING"
     return 3, "NOT_STARTED"
+
 
 # =========================
 # SENSOR
@@ -201,6 +211,7 @@ def wait_one_done(workflow_id: int, task_id: int, **context) -> bool:
 
     print("[INFO] Finished. Sensor succeeds.")
     return True
+
 
 # =========================
 # LOG WRITER
@@ -296,6 +307,7 @@ def write_one_log(workflow_id: int, task_id: int, **context) -> None:
 
     Variable.set(sent_var, today_iso)
     print("[INFO] Log upserted into pfm_etl_log. Variable {0} set to {1}".format(sent_var, today_iso))
+
 
 # =========================
 # DAG
